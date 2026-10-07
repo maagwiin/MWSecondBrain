@@ -14,6 +14,13 @@ let csrfToken = '';
 let currentStatus: Status | null = null;
 let inFlight = false;
 let pollTimer: number | undefined;
+let authGeneration = 0;
+
+function setAuthenticated(token: string): void {
+  authGeneration += 1;
+  csrfToken = token;
+  currentStatus = null;
+}
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text = ''): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -30,15 +37,17 @@ function formatDate(value: string | null): string {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const requestGeneration = authGeneration;
   const headers = new Headers(init.headers);
   if (init.body) headers.set('Content-Type', 'application/json');
   if (init.method && init.method !== 'GET') headers.set('X-CSRF-Token', csrfToken);
   const response = await fetch(path, { ...init, headers, credentials: 'same-origin' });
-  if (response.status === 401 && path !== '/api/login') {
+  if (response.status === 401 && path !== '/api/login' && requestGeneration === authGeneration) {
     csrfToken = '';
     showLogin('Sua sessão terminou. Entre novamente para continuar.');
     throw new Error('Sessão encerrada.');
   }
+  if (requestGeneration !== authGeneration) throw new Error('Resposta de uma sessão anterior.');
   if (!response.ok) {
     let message = `Não foi possível concluir a ação (${response.status}).`;
     try {
@@ -66,6 +75,9 @@ function setAlert(host: HTMLElement, message: string): void {
 }
 
 function showLogin(note = ''): void {
+  authGeneration += 1;
+  csrfToken = '';
+  currentStatus = null;
   clearApp();
   const shell = el('main', 'auth-shell');
   const card = el('section', 'auth-card');
@@ -97,7 +109,7 @@ function showLogin(note = ''): void {
     try {
       await request('/api/login', { method: 'POST', body: JSON.stringify({ password: password.value }) });
       const session = await request<{ authenticated: boolean; csrf_token: string }>('/api/session');
-      csrfToken = session.csrf_token;
+      setAuthenticated(session.csrf_token);
       await route();
     } catch (error) {
       if (error instanceof Error && error.message !== 'Sessão encerrada.') setAlert(card, error.message);
@@ -146,7 +158,6 @@ function renderDashboard(status: Status, alertText = ''): void {
   logout.disabled = inFlight;
   logout.addEventListener('click', () => runAction(logout, async () => {
     await request('/api/logout', { method: 'POST', body: '{}' });
-    csrfToken = '';
     showLogin('Você saiu da sua conta.');
   }));
   topActions.append(logout);
@@ -165,10 +176,17 @@ function renderDashboard(status: Status, alertText = ''): void {
   const statusCard = el('section', 'panel mode-panel');
   const panelCopy = el('div', 'panel-copy');
   panelCopy.append(el('p', 'eyebrow', 'CONTROLE DO VAULT'));
-  panelCopy.append(el('h2', '', status.mode === 'editing' ? 'Você está editando' : 'O agente está pronto'));
-  panelCopy.append(el('p', 'muted', status.mode === 'editing'
-    ? 'O agente aguarda enquanto o Obsidian está aberto para edição.'
-    : 'Sincronização e backup ficam disponíveis enquanto o vault está fechado.'));
+  const modeTitle: Record<Status['mode'], string> = {
+    agent: 'O agente está pronto', editing: 'Você está editando', transition: 'Mudança de modo em andamento', error: 'O modo precisa de recuperação',
+  };
+  const modeDescription: Record<Status['mode'], string> = {
+    agent: 'Sincronização e backup ficam disponíveis enquanto o vault está fechado.',
+    editing: 'O agente aguarda enquanto o Obsidian está aberto para edição.',
+    transition: 'Aguarde a confirmação do estado atual. O painel atualizará automaticamente.',
+    error: 'A última mudança de modo foi interrompida. A recuperação usa a transição segura e não encerra o Obsidian à força.',
+  };
+  panelCopy.append(el('h2', '', modeTitle[status.mode]));
+  panelCopy.append(el('p', 'muted', modeDescription[status.mode]));
   const actions = el('div', 'action-row');
   if (status.mode === 'agent') {
     const assume = el('button', 'button button-primary', 'Assumir edição');
@@ -191,6 +209,14 @@ function renderDashboard(status: Status, alertText = ''): void {
       renderDashboard(currentStatus);
     }));
     actions.append(openEditor, finish);
+  } else if (status.mode === 'error') {
+    const recover = el('button', 'button button-primary', 'Recuperar modo agente');
+    recover.disabled = inFlight;
+    recover.addEventListener('click', () => runAction(recover, async () => {
+      currentStatus = await request<Status>('/api/mode', { method: 'POST', body: JSON.stringify({ mode: 'agent' }) });
+      renderDashboard(currentStatus);
+    }));
+    actions.append(recover);
   }
   statusCard.append(panelCopy, actions);
 
@@ -249,29 +275,36 @@ async function runAction(button: HTMLButtonElement, action: () => Promise<void>)
   inFlight = true;
   button.disabled = true;
   const original = button.textContent;
+  let actionError = '';
   button.textContent = 'Aguarde…';
   try {
     await action();
   } catch (error) {
     if (error instanceof Error && error.message !== 'Sessão encerrada.') {
-      if (currentStatus) renderDashboard(currentStatus, error.message);
+      actionError = error.message;
     }
   } finally {
     inFlight = false;
-    if (button.isConnected) {
+    if (actionError && csrfToken && location.pathname !== '/chat' && currentStatus) {
+      renderDashboard(currentStatus, actionError);
+    } else if (button.isConnected) {
       button.disabled = false;
       button.textContent = original;
-    } else if (csrfToken && location.pathname !== '/chat' && currentStatus) renderDashboard(currentStatus);
+    } else if (csrfToken && location.pathname !== '/chat' && currentStatus) renderDashboard(currentStatus, actionError);
   }
 }
 
 async function refreshStatus(): Promise<void> {
   if (inFlight || !csrfToken || location.pathname === '/chat') return;
+  const generation = authGeneration;
   try {
     const status = await request<Status>('/api/status');
+    if (generation !== authGeneration || !csrfToken) return;
     renderDashboard(status);
   } catch (error) {
-    if (error instanceof Error && error.message !== 'Sessão encerrada.' && currentStatus) renderDashboard(currentStatus, error.message);
+    if (generation === authGeneration && error instanceof Error && error.message !== 'Sessão encerrada.' && currentStatus) {
+      renderDashboard(currentStatus, error.message);
+    }
   }
 }
 
@@ -294,16 +327,19 @@ function showChat(): void {
 }
 
 async function route(): Promise<void> {
+  const generation = authGeneration;
   if (location.pathname === '/chat') {
     try {
       const session = await request<{ authenticated: boolean; csrf_token: string }>('/api/session');
-      csrfToken = session.csrf_token;
+      if (generation !== authGeneration) return;
+      setAuthenticated(session.csrf_token);
       showChat();
     } catch { /* 401 route handler renders login. */ }
     return;
   }
   try {
     const status = await request<Status>('/api/status');
+    if (generation !== authGeneration || !csrfToken) return;
     renderDashboard(status);
   } catch { /* 401 route handler renders login. */ }
 }
@@ -311,7 +347,7 @@ async function route(): Promise<void> {
 async function start(): Promise<void> {
   try {
     const session = await request<{ authenticated: boolean; csrf_token: string }>('/api/session');
-    csrfToken = session.csrf_token;
+    setAuthenticated(session.csrf_token);
     await route();
   } catch {
     if (!csrfToken) showLogin();
