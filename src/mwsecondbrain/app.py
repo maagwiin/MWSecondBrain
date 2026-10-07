@@ -328,7 +328,8 @@ def create_app(settings=None, *, sync_callback=None, backup_callback=None,
 
     @app.post("/api/mode")
     def mode(body: ModeBody, current=Depends(require_mutation)):
-        return controller.change_mode(body.mode)
+        controller.change_mode(body.mode)
+        return status(current)
 
     @app.post("/api/sync")
     def sync(current=Depends(require_mutation)):

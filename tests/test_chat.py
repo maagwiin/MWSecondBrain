@@ -278,6 +278,25 @@ def test_phase_one_remains_available_without_optional_runtime(context):
         assert browser.get("/healthz").json() == {"status": "ok"}
 
 
+def test_mode_response_preserves_ready_subscription_runtime(context, monkeypatch):
+    settings, _, _ = context
+    monkeypatch.setenv("MWSB_TELEGRAM_CONFIG", str(settings.state_dir / "disabled-telegram.json"))
+    app = create_app(settings, editor=Editor(), runtime=Runtime(), runtime_verified=True,
+                     sync_callback=lambda _: {"state": "success", "pending": False},
+                     backup_callback=lambda *args: {"state": "success"},
+                     scheduler_enabled=False, chat_worker_enabled=False)
+    app.state.auth.set_password("strong local password")
+    with TestClient(app, base_url=settings.public_origin) as browser:
+        login = browser.post("/api/login", json={"password": "strong local password"}, headers={"Origin": settings.public_origin})
+        headers = {"Origin": settings.public_origin, "X-CSRF-Token": login.json()["csrf_token"]}
+        assert browser.get("/api/status").json()["phase2"] == {"ready": True, "reason": ""}
+        for target in ("editing", "agent"):
+            changed = browser.post("/api/mode", json={"mode": target}, headers=headers)
+            assert changed.status_code == 200
+            assert changed.json()["mode"] == target
+            assert changed.json()["phase2"] == browser.get("/api/status").json()["phase2"] == {"ready": True, "reason": ""}
+
+
 def test_queued_turns_are_paired_in_model_context(context):
     _, database, controller = context
     store, runtime = ChatStore(database), Runtime()
