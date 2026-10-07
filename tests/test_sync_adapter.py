@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import time
 from unittest.mock import patch
 
 from mwsecondbrain.sync import sync
@@ -43,3 +44,17 @@ class SyncAdapterTests(unittest.TestCase):
                 result = sync(vault)
                 self.assertEqual(result['state'], 'ERROR')
                 self.assertNotIn('secret', str(result))
+
+    def test_timeout_stops_descendants_before_releasing_vault(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            vault = root / 'vault'
+            vault.mkdir()
+            marker = vault / 'late-write'
+            child = 'import time,pathlib; time.sleep(.5); pathlib.Path(' + repr(str(marker)) + ').write_text("late")'
+            script = root / 'script.py'
+            script.write_text('import subprocess,sys,time\nsubprocess.Popen([sys.executable,"-c",' + repr(child) + '])\ntime.sleep(5)\n')
+            with patch.dict(os.environ, MWSB_SYNC_SCRIPT=str(script)), patch('mwsecondbrain.sync.TIMEOUT_SECONDS', .1, create=True):
+                self.assertEqual(sync(vault)['state'], 'ERROR')
+            time.sleep(.7)
+            self.assertFalse(marker.exists(), 'A writer survived the controller operation')

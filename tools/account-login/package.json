@@ -1,0 +1,1 @@
+{"name":"mwsecondbrain-auth-validation","version":"0.1.0","private":true,"type":"module","scripts":{"test":"node --test","login":"node cli.mjs login","verify":"node cli.mjs verify"},"engines":{"node":">=22"}}

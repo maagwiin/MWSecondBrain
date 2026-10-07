@@ -22,6 +22,8 @@ Package src/mwsecondbrain. Config via MWSB_* variables. Controller persists mode
 
 Sync callback sync(vault:Path)->dict {state,message,head?,pending}. Backup callback backup(vault:Path,state_dir:Path,backup_dir:Path)->dict. Frontend does not infer successful sync from local saves. Use UTC timestamps for state, America/Sao_Paulo for daily scheduling at 03:00.
 
-Vault contains trusted versioned brain_sync.py. Public app ships reusable conservative Git integration; private script gains reconcile action importing/calling it without changing old command behavior. Scanner callable is supplied by private utility; public tests use synthetic fixtures. At every write, full scanner and explicit paths retained. No force, reset --hard, stash or automatic rebase.
+The sync adapter invokes a root-installed copy of the private `brain_sync.py` and `brain_policy.py` outside the mutable vault. The private utility adds `reconcile` without changing existing commands; its tests use temporary Git repositories. At every write, scanning and explicit path selection remain required. No force push, reset --hard, stash or automatic rebase.
+
+Logout revokes the session before attempting graceful editor shutdown. Caddy closes proxied streams after 30 seconds, bounding access by an already-established WebSocket after revocation or expiration. The browser transport must reconnect and pass authentication again. Failed shutdown leaves the vault blocked for recovery.
 
 No sensitive values in logs; no production domain or repository identity in public code. UI in Portuguese, keyboard accessible, vanilla TypeScript, no React required. Production frontend served by FastAPI; Vite development proxy only for local tests.

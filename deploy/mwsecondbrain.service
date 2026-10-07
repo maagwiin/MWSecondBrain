@@ -8,7 +8,7 @@ User=mwsb
 Group=mwsb
 WorkingDirectory=/opt/mwsecondbrain/current
 EnvironmentFile=/etc/mwsecondbrain/environment
-ExecStart=/opt/mwsecondbrain/venv/bin/uvicorn mwsecondbrain.app:app --host 127.0.0.1 --port 8765 --workers 1 --no-proxy-headers
+ExecStart=/opt/mwsecondbrain/current/.venv/bin/uvicorn mwsecondbrain.app:create_from_env --factory --host 127.0.0.1 --port 8765 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1
 Restart=on-failure
 RestartSec=5
 UMask=0077
