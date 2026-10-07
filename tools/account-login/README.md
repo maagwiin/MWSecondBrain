@@ -95,7 +95,7 @@ Se a autorização ou inferência falhar, a etapa de validação permanece pende
 - A verificação usa workspace vazio em `private/runtime/workspace`, prompt fixo sem ferramentas e sandbox readOnly com rede de ferramentas desativada. O processo filho desliga shell, unified exec, visualização de imagem, apps, plugins e web search. Pedidos RPC de ferramenta são recusados.
 - Compatibilidade com Codex 0.160.1: `readOnly.access` é rejeitado com RPC -32600. O helper usa a forma suportada `{type: "readOnly", networkAccess: false}`. Esta etapa não comprova confinamento de leitura a um diretório; isso exige um permissionProfile verificado antes de implementar o runtime final.
 - Tokens não entram no armazenamento do navegador, nos logs nem no controle de versão. `private/` está no `.gitignore`.
-- Este helper atende a uma conta selecionada. Não implementa chat, múltiplas contas, logout nem refresh contínuo. Quando o token expira, execute `login` novamente. Para desconectar a autorização, use ChatGPT Settings.
+- Este helper atende a uma conta selecionada. O CLI de validação não implementa chat, múltiplas contas, logout nem refresh contínuo. O runtime Python usa `refresh.mjs` internamente, sob seu lock exclusivo, para renovar tokens sem iniciar inferência. Não execute esse script simultaneamente fora do runtime. Sessões revogadas exigem novo `login`. Para desconectar a autorização, use ChatGPT Settings.
 - `MWSB_AUTH_DIR` permite escolher um diretório privado fora da árvore de código. Use armazenamento persistente protegido para preservar o host ID e a autorização. Não publique o listener de loopback.
 
 ## Testes
@@ -104,7 +104,7 @@ Se a autorização ou inferência falhar, a etapa de validação permanece pende
 npm test
 ```
 
-Os 17 testes exercitam PKCE, callback adulterado, vínculo de client ID, JWT inválido, permissão do plano, modos de arquivo, host ID, aliases locais, expiração com sockets abertos, importação protegida, compatibilidade do RPC e condição estrita de inferência concluída. Exchanges OAuth e conclusões de inferência são simulados; os testes não comprovam acesso real à conta e não consomem limites do plano.
+Os 20 testes exercitam PKCE, callback adulterado, vínculo de client ID, JWT inválido, permissão do plano, modos de arquivo, host ID, aliases locais, expiração com sockets abertos, importação protegida, compatibilidade do RPC e condição estrita de inferência concluída. Também verificam rotação protegida de tokens, revogação sem vazamento e rejeição de escopos reduzidos no refresh. Exchanges OAuth e conclusões de inferência são simulados; os testes não comprovam acesso real à conta e não consomem limites do plano.
 
 Para verificar o handshake real do App Server sem inferência, execute separadamente:
 

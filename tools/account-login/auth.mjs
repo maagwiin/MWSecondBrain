@@ -47,7 +47,7 @@ export function verifyIdToken(token, jwks, {clientId,nonce,now=Date.now()/1000,s
   const audiences = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
   if (claims.iss !== ISSUER || !audiences.includes(clientId) || (audiences.length > 1 && claims.azp !== clientId) || (claims.azp && claims.azp !== clientId)) throw new Error('ID token issuer or audience invalid');
   if (!Number.isFinite(claims.exp) || claims.exp <= now || (claims.nbf !== undefined && (!Number.isFinite(claims.nbf) || claims.nbf > now))) throw new Error('ID token expired or premature');
-  if (!equal(claims.nonce,nonce) || typeof claims.sub !== 'string' || !claims.sub || (subject && subject !== claims.sub)) throw new Error('ID token identity or nonce mismatch');
+  if ((nonce !== undefined && !equal(claims.nonce,nonce)) || typeof claims.sub !== 'string' || !claims.sub || (subject && subject !== claims.sub)) throw new Error('ID token identity or nonce mismatch');
   return claims;
 }
 
