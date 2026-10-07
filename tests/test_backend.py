@@ -412,3 +412,64 @@ def test_backup_failure_during_editing_end_blocks_sync(settings):
     assert calls == []
     assert controller.status()["mode"] == "error"
     assert controller.status()["backup"]["last_success_at"] is None
+
+
+def test_backup_requirement_survives_failed_transition_and_restart(settings):
+    calls = []
+    database = Database(settings.state_dir)
+    controller = Controller(settings, database, Editor(), lambda _: {"state": "offline", "pending": True}, lambda *args: {"state": "error"})
+    controller.change_mode("editing")
+    with pytest.raises(UnsafeOperation):
+        controller.change_mode("agent")
+    assert database.get("backup_required") is True
+    recovered = Controller(settings, Database(settings.state_dir), Editor(), lambda _: calls.append("sync") or {"state": "offline", "pending": True}, lambda *args: calls.append("backup") or {"state": "success"})
+    recovered.change_mode("agent")
+    assert calls == ["backup", "sync"]
+    assert database.get("backup_required") is False
+
+
+def test_flock_prevents_other_process_writes(settings):
+    import subprocess
+    import sys
+    controller = Controller(settings, Database(settings.state_dir), Editor(), lambda _: {}, lambda *args: {})
+    probe = """import fcntl, sys
+with open(sys.argv[1], 'a') as lock:
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit(23)
+"""
+    with controller.exclusive():
+        result = subprocess.run([sys.executable, "-c", probe, str(controller.lock_path)])
+    assert result.returncode == 23
+    result = subprocess.run([sys.executable, "-c", probe, str(controller.lock_path)])
+    assert result.returncode == 0
+
+
+def test_cli_password_initialization_and_reset_use_getpass(monkeypatch, tmp_path, capsys):
+    from mwsecondbrain.cli import main
+    for name, value in {"MWSB_VAULT_DIR": tmp_path / "vault", "MWSB_STATE_DIR": tmp_path / "state", "MWSB_BACKUP_DIR": tmp_path / "backups", "MWSB_PUBLIC_ORIGIN": "https://brain.example.test"}.items():
+        monkeypatch.setenv(name, str(value))
+    monkeypatch.setattr("getpass.getpass", lambda prompt: "first strong password")
+    assert main(["init-password"]) == 0
+    database = Database(tmp_path / "state")
+    auth = Auth(database)
+    token, _ = auth.login("first strong password", "127.0.0.1")
+    assert main(["init-password"]) == 1
+    assert "already initialized" in capsys.readouterr().err
+    monkeypatch.setattr("getpass.getpass", lambda prompt: "second strong password")
+    assert main(["reset-password"]) == 0
+    assert auth.session(token) is None
+    auth.login("second strong password", "127.0.0.1")
+
+
+def test_cli_confirmation_mismatch_never_changes_password(monkeypatch, tmp_path, capsys):
+    from mwsecondbrain.cli import main
+    for name, value in {"MWSB_VAULT_DIR": tmp_path / "vault", "MWSB_STATE_DIR": tmp_path / "state", "MWSB_BACKUP_DIR": tmp_path / "backups", "MWSB_PUBLIC_ORIGIN": "https://brain.example.test"}.items():
+        monkeypatch.setenv(name, str(value))
+    passwords = iter(["first strong password", "different strong password"])
+    monkeypatch.setattr("getpass.getpass", lambda prompt: next(passwords))
+    assert main(["init-password"]) == 1
+    assert "do not match" in capsys.readouterr().err
+    with Database(tmp_path / "state").connect() as connection:
+        assert connection.execute("SELECT value FROM metadata WHERE key='password_hash'").fetchone() is None
