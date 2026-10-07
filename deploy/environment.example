@@ -1,0 +1,8 @@
+MWSB_PUBLIC_ORIGIN=https://brain.example.com
+MWSB_VAULT=/var/lib/mwsecondbrain/vault
+MWSB_STATE_DIR=/var/lib/mwsecondbrain/state
+MWSB_BACKUP_DIR=/var/lib/mwsecondbrain/backups
+MWSB_FRONTEND_DIR=/opt/mwsecondbrain/current/frontend/dist
+MWSB_OBSIDIAN_CONFIG_DIR=/var/lib/mwsecondbrain/obsidian
+MWSB_SYNC_SCRIPT=/opt/mwsecondbrain/private-sync/brain_sync.py
+GIT_SSH_COMMAND=/usr/bin/ssh -i /etc/mwsecondbrain/github -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/mwsecondbrain/known_hosts

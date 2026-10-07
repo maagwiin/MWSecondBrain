@@ -1,0 +1,21 @@
+services:
+  obsidian:
+    image: lscr.io/linuxserver/obsidian@sha256:8c56192bea819380a36c1fa5d3d54e77b0cb4de35c2810e855f43730226528c0
+    container_name: mwsb-obsidian
+    restart: "no"
+    environment:
+      PUID: ${MWSB_UID:?Set dedicated user UID}
+      PGID: ${MWSB_GID:?Set dedicated group GID}
+      TZ: America/Sao_Paulo
+      SUBFOLDER: /obsidian/
+      SELKIES_ENABLE_BINARY_CLIPBOARD: "false"
+      SELKIES_ENABLE_FILE_TRANSFERS: "false"
+    volumes:
+      - /var/lib/mwsecondbrain/obsidian:/config
+      - /var/lib/mwsecondbrain/vault:/vault
+    ports:
+      - 127.0.0.1:8766:3000
+    shm_size: 256mb
+    mem_limit: 1536m
+    cpus: 1.5
+    pids_limit: 256

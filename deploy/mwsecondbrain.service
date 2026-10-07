@@ -1,0 +1,22 @@
+[Unit]
+Description=MWSecondBrain private dashboard
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+User=mwsb
+Group=mwsb
+WorkingDirectory=/opt/mwsecondbrain/current
+EnvironmentFile=/etc/mwsecondbrain/environment
+ExecStart=/opt/mwsecondbrain/venv/bin/uvicorn mwsecondbrain.app:app --host 127.0.0.1 --port 8765 --workers 1 --no-proxy-headers
+Restart=on-failure
+RestartSec=5
+UMask=0077
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+MemoryMax=512M
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

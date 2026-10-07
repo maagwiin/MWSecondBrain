@@ -1,0 +1,73 @@
+#!/usr/bin/python3
+"""Root-owned, fixed-operation editor supervisor. No caller-controlled paths."""
+import json
+import subprocess
+import sys
+import time
+
+CONTAINER = "mwsb-obsidian"
+
+
+def docker(*args, timeout=20):
+    return subprocess.run(["/usr/bin/docker", *args], capture_output=True, timeout=timeout)
+
+
+def state():
+    result = docker("inspect", "--format", "{{.State.Running}}", CONTAINER)
+    if result.returncode:
+        return "unknown"
+    return {b"true": "running", b"false": "stopped"}.get(result.stdout.strip(), "unknown")
+
+
+def running_app():
+    result = docker("exec", CONTAINER, "pgrep", "-x", "obsidian")
+    if result.returncode not in (0, 1):
+        raise RuntimeError("Cannot confirm application state")
+    return result.returncode == 0
+
+
+def stop():
+    if state() != "running":
+        return
+    if running_app():
+        windows = docker("exec", "-u", "abc", "-e", "DISPLAY=:1", CONTAINER,
+                         "xdotool", "search", "--onlyvisible", "--class", "obsidian")
+        if windows.returncode or not windows.stdout.split():
+            raise RuntimeError("Save and close Obsidian before releasing the vault")
+        window = windows.stdout.split()[-1].decode("ascii")
+        if not window.isdigit():
+            raise RuntimeError("Invalid application window")
+        requested = docker("exec", "-u", "abc", "-e", "DISPLAY=:1", CONTAINER,
+                           "xdotool", "windowactivate", "--sync", window,
+                           "key", "--clearmodifiers", "ctrl+q")
+        if requested.returncode:
+            raise RuntimeError("Graceful close request failed")
+        deadline = time.monotonic() + 20
+        while running_app() and time.monotonic() < deadline:
+            time.sleep(0.25)
+        if running_app():
+            raise RuntimeError("Obsidian did not confirm exit; vault stays locked")
+    # The application is already gone: only desktop transport services remain.
+    if docker("stop", "--time", "15", CONTAINER, timeout=25).returncode:
+        raise RuntimeError("Cannot confirm container exit")
+
+
+def main():
+    if len(sys.argv) != 2 or sys.argv[1] not in {"status", "start", "stop"}:
+        return 2
+    try:
+        if sys.argv[1] == "start" and state() == "stopped":
+            if docker("start", CONTAINER).returncode:
+                raise RuntimeError("Editor start failed")
+        elif sys.argv[1] == "stop":
+            stop()
+        current = state()
+        print(json.dumps({"state": current}))
+        return 0 if current != "unknown" else 1
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        print(json.dumps({"state": "unknown", "message": "Editor não confirmou transição segura; gravações permanecem bloqueadas."}))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

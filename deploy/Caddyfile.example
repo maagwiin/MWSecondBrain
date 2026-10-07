@@ -1,0 +1,21 @@
+brain.example.com {
+    encode zstd gzip
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy same-origin
+        X-Frame-Options SAMEORIGIN
+    }
+    @obsidian path /obsidian/*
+    handle @obsidian {
+        forward_auth 127.0.0.1:8765 {
+            uri /api/proxy-auth
+        }
+        reverse_proxy 127.0.0.1:8766
+    }
+    redir /obsidian /obsidian/ 308
+    handle {
+        reverse_proxy 127.0.0.1:8765 {
+            flush_interval -1
+        }
+    }
+}
