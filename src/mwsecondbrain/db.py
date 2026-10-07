@@ -29,6 +29,44 @@ class Database:
                     ip TEXT PRIMARY KEY, failures INTEGER NOT NULL, started REAL NOT NULL
                 );
                 INSERT OR IGNORE INTO metadata VALUES ('mode', '"agent"');
+                CREATE TABLE IF NOT EXISTS chat_conversations (
+                    id TEXT PRIMARY KEY, created_at TEXT NOT NULL, capture_paused INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, job_id TEXT NOT NULL,
+                    role TEXT NOT NULL, content TEXT NOT NULL, origin TEXT NOT NULL,
+                    status TEXT NOT NULL, created_at TEXT NOT NULL, attachments TEXT NOT NULL DEFAULT '[]'
+                );
+                CREATE TABLE IF NOT EXISTS chat_jobs (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+                    conversation_id TEXT NOT NULL, message_id TEXT NOT NULL, assistant_id TEXT,
+                    origin TEXT NOT NULL, idempotency_key TEXT NOT NULL, model TEXT,
+                    attachment_ids TEXT NOT NULL, external_reply TEXT, status TEXT NOT NULL,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0, capture_denied INTEGER NOT NULL DEFAULT 0,
+                    error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    UNIQUE(origin,idempotency_key)
+                );
+                CREATE TABLE IF NOT EXISTS chat_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS chat_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL UNIQUE,
+                    external_reply TEXT NOT NULL, content TEXT NOT NULL,
+                    status TEXT NOT NULL, created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS note_snapshots (
+                    id TEXT PRIMARY KEY, created_at TEXT NOT NULL, available INTEGER NOT NULL, reason TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS note_snapshot_files (
+                    snapshot_id TEXT NOT NULL, path TEXT NOT NULL, content TEXT NOT NULL,
+                    content_hash TEXT NOT NULL, PRIMARY KEY(snapshot_id,path)
+                );
+                CREATE TABLE IF NOT EXISTS note_operations (
+                    id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, job_id TEXT NOT NULL,
+                    path TEXT NOT NULL, base_hash TEXT, new_hash TEXT NOT NULL, content TEXT NOT NULL,
+                    reason TEXT NOT NULL, status TEXT NOT NULL, error TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
             """)
 
     @contextmanager

@@ -75,6 +75,8 @@ class Controller:
         self.backup_callback = backup_callback if backup_callback is not None else production_backup
         self.clock = clock
         self.lock_path = settings.state_dir / "controller.lock"
+        from .notes import NotesService
+        self.notes = NotesService(self)
         self._recover()
 
     @contextmanager
@@ -185,6 +187,16 @@ class Controller:
                 self.database.set("backup_attempt_day", scheduled_day)
             return self._backup()
 
+    def apply_note_operations(self):
+        with self.exclusive():
+            if self.database.get("mode") == "editing":
+                return {"applied": 0, "rejected": 0, "queued": self.notes.pending_count()}
+            self._require_agent()
+            result = self.notes.apply_pending_locked()
+            if result["applied"]:
+                self._sync()
+            return result
+
     def change_mode(self, target):
         if target not in {"agent", "editing"}:
             raise UnsafeOperation("Invalid mode")
@@ -209,10 +221,13 @@ class Controller:
                 if target == "editing":
                     if not self.editor.available:
                         raise UnsafeOperation("Editor helper unavailable")
+                    self.notes.capture_snapshot_locked()
                     self.database.set("backup_required", True)
                     self.editor.start()
                     if self._editor_state() != "running":
                         raise UnsafeOperation("Editor start was not confirmed")
+                elif self.notes.apply_pending_locked()["applied"]:
+                    self._sync()
                 self.database.set("mode", target)
             except Exception as error:
                 self.database.set("mode", "error")
