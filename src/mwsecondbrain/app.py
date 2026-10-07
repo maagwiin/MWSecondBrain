@@ -106,7 +106,7 @@ def create_app(settings=None, *, sync_callback=None, backup_callback=None,
     worker = ChatWorker(store, controller, runtime, completion_hook,
                         attachments_resolver or (attachments.resolve if attachments else None), verified)
     telegram = None
-    if attachments is not None:
+    if attachments is not None and os.environ.get("MWSB_TELEGRAM_ENABLED") == "1":
         try:
             from .telegram import TelegramService
             telegram = TelegramService(store, attachments, os.environ.get("MWSB_TELEGRAM_CONFIG", "/etc/mwsecondbrain/telegram.json"))

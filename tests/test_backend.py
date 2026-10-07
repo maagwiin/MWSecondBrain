@@ -57,6 +57,24 @@ def mutation(browser, csrf):
     return {"Origin": "https://brain.example.test", "X-CSRF-Token": csrf}
 
 
+def test_telegram_config_does_not_enable_connector(settings, monkeypatch, tmp_path):
+    from mwsecondbrain import telegram
+
+    config = tmp_path / "telegram.json"
+    config.write_text("{}")
+    monkeypatch.setenv("MWSB_TELEGRAM_CONFIG", str(config))
+    monkeypatch.delenv("MWSB_TELEGRAM_ENABLED", raising=False)
+
+    def unexpected_connector(*args, **kwargs):
+        pytest.fail("Telegram must require explicit enablement")
+
+    monkeypatch.setattr(telegram, "TelegramService", unexpected_connector)
+    app = create_app(settings, editor=Editor(), scheduler_enabled=False,
+                     chat_worker_enabled=False)
+    with TestClient(app):
+        assert app.state.telegram is None
+
+
 def test_auth_cookie_session_and_revocation(client):
     browser, app, _ = client
     assert browser.get("/api/session").status_code == 401
@@ -363,7 +381,7 @@ def test_frontend_serves_built_assets_only(settings, tmp_path):
         assert browser.get("/../state/state.sqlite3").status_code == 404
         assert browser.get("/api/session").status_code == 401
         assert "Built frontend" in browser.get("/chat").text
-        assert browser.get("/api/chat").status_code == 404
+        assert browser.get("/api/chat").status_code == 401
 
 
 def test_environment_factory(monkeypatch, tmp_path):

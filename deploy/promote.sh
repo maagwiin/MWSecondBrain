@@ -3,7 +3,9 @@
 set -Eeuo pipefail
 umask 077
 test "$(id -u)" = 0
-test "$#" = 1
+test "$#" -ge 1 && test "$#" -le 2
+PREPARE_ONLY=${2:-}
+test -z "$PREPARE_ONLY" || test "$PREPARE_ONLY" = --prepare-only
 SOURCE=$(realpath "$1")
 test -f "$SOURCE/frontend/dist/index.html"
 test -L /opt/mwsecondbrain/current
@@ -20,6 +22,10 @@ uv pip install --cache-dir /tmp/mwsb-install-cache --python "$RELEASE/.venv/bin/
 uv pip install --cache-dir /tmp/mwsb-install-cache --python "$RELEASE/.venv/bin/python" --no-deps "$RELEASE"
 chmod -R a+rX "$RELEASE"
 runuser -u mwsb -- "$RELEASE/.venv/bin/python" -c 'import mwsecondbrain.app, uvicorn'
+if [ "$PREPARE_ONLY" = --prepare-only ]; then
+  echo "Application release prepared without changing active services: $RELEASE"
+  exit 0
+fi
 test "$(docker inspect --format '{{.State.Running}}' mwsb-obsidian)" = false
 SUCCESS=false
 SWITCHED=false
