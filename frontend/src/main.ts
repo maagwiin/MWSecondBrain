@@ -1,4 +1,5 @@
 import './style.css';
+import { mountChat } from './chat';
 
 type Status = {
   mode: 'agent' | 'editing' | 'transition' | 'error';
@@ -15,6 +16,7 @@ let currentStatus: Status | null = null;
 let inFlight = false;
 let pollTimer: number | undefined;
 let authGeneration = 0;
+let activeViewCleanup: (() => void) | undefined;
 
 function setAuthenticated(token: string): void {
   authGeneration += 1;
@@ -39,7 +41,7 @@ function formatDate(value: string | null): string {
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const requestGeneration = authGeneration;
   const headers = new Headers(init.headers);
-  if (init.body) headers.set('Content-Type', 'application/json');
+  if (init.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json');
   if (init.method && init.method !== 'GET') headers.set('X-CSRF-Token', csrfToken);
   const response = await fetch(path, { ...init, headers, credentials: 'same-origin' });
   if (response.status === 401 && path !== '/api/login' && requestGeneration === authGeneration) {
@@ -61,6 +63,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 function clearApp(): void {
   window.clearTimeout(pollTimer);
+  activeViewCleanup?.();
+  activeViewCleanup = undefined;
   app.replaceChildren();
 }
 
@@ -255,7 +259,7 @@ function renderDashboard(status: Status, alertText = ''): void {
   phaseCopy.append(el('p', 'muted', status.phase2.ready
     ? 'A próxima etapa está disponível para configuração.'
     : status.phase2.reason || 'Disponível após confirmar a elegibilidade da assinatura.'));
-  const chatLink = el('a', 'button button-quiet', 'Em preparação');
+  const chatLink = el('a', 'button button-quiet', 'Abrir Gepeto');
   chatLink.href = '/chat';
   phasePanel.append(phaseIcon, phaseCopy, chatLink);
 
@@ -310,20 +314,7 @@ async function refreshStatus(): Promise<void> {
 
 function showChat(): void {
   clearApp();
-  const page = el('main', 'page-shell');
-  const top = el('header', 'topbar');
-  const back = el('a', 'wordmark', 'MW SecondBrain');
-  back.href = '/';
-  top.append(back);
-  const card = el('section', 'not-ready-card');
-  card.append(el('p', 'eyebrow', 'FASE 2'));
-  card.append(el('h1', '', 'O assistente ainda está em preparação.'));
-  card.append(el('p', 'muted', 'A conversa será liberada quando a elegibilidade da assinatura SIWC estiver confirmada. Nenhuma conversa está disponível nesta fase.'));
-  const backLink = el('a', 'button button-primary', 'Voltar ao painel');
-  backLink.href = '/';
-  card.append(backLink);
-  page.append(top, card);
-  app.append(page);
+  activeViewCleanup = mountChat(app, request);
 }
 
 async function route(): Promise<void> {
