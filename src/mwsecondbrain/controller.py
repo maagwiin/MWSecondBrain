@@ -30,7 +30,7 @@ class EditorHelper:
             raise UnsafeOperation("Invalid editor operation")
         try:
             result = subprocess.run(["sudo", "-n", str(self.path), verb], check=True,
-                                    capture_output=True, text=True, timeout=60)
+                                    capture_output=True, text=True, timeout=120)
             return json.loads(result.stdout)
         except (OSError, subprocess.SubprocessError, ValueError):
             raise UnsafeOperation("Editor helper failed; writer state must be confirmed") from None
@@ -222,6 +222,20 @@ class Controller:
                     raise
                 raise UnsafeOperation("Editor transition failed") from None
             return self.status()
+
+    def close_editor_for_logout(self):
+        """Revoke editing authority, stop safely, and leave saved changes for recovery."""
+        with self.exclusive():
+            mode = self.database.get("mode", "error")
+            if mode == "agent" and self._editor_state() == "stopped":
+                return
+            self.database.set("mode", "error")
+            self.database.set("backup_required", True)
+            try:
+                self.editor.stop()
+            except Exception:
+                raise UnsafeOperation("Editor shutdown could not be confirmed") from None
+            self._require_stopped()
 
     def status(self):
         mode = self.database.get("mode", "error")

@@ -152,9 +152,15 @@ def create_app(settings=None, *, sync_callback=None, backup_callback=None,
 
     @app.post("/api/logout")
     def logout(request: Request, response: Response, current=Depends(require_mutation)):
+        # Revocation comes first, even if the editor or helper cannot be stopped.
         auth.logout(request.cookies[COOKIE_NAME])
         response.delete_cookie(COOKIE_NAME, path="/", httponly=True, secure=True, samesite="strict")
-        return {"authenticated": False}
+        result = {"authenticated": False}
+        try:
+            controller.close_editor_for_logout()
+        except UnsafeOperation:
+            result["warning"] = "Session revoked; editor shutdown could not be confirmed. Recovery is required."
+        return result
 
     @app.get("/api/status")
     def status(current=Depends(require_session)):

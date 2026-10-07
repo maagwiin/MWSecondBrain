@@ -473,3 +473,65 @@ def test_cli_confirmation_mismatch_never_changes_password(monkeypatch, tmp_path,
     assert "do not match" in capsys.readouterr().err
     with Database(tmp_path / "state").connect() as connection:
         assert connection.execute("SELECT value FROM metadata WHERE key='password_hash'").fetchone() is None
+
+
+def test_logout_stops_editor_without_running_sync_or_backup(client):
+    browser, app, _ = client
+    csrf = login(browser)
+    browser.post("/api/mode", json={"mode": "editing"}, headers=mutation(browser, csrf))
+    app.state.controller.sync_callback = lambda _: pytest.fail("Logout must not reconcile the vault")
+    app.state.controller.backup_callback = lambda *args: pytest.fail("Logout must not write backups")
+    token = browser.cookies.get("mwsb_session")
+    response = browser.post("/api/logout", headers=mutation(browser, csrf))
+    assert response.status_code == 200
+    assert response.json() == {"authenticated": False}
+    assert app.state.auth.session(token) is None
+    assert app.state.controller.editor.state == "stopped"
+    assert app.state.controller.status()["mode"] == "error"
+    assert app.state.database.get("backup_required") is True
+
+
+def test_logout_revokes_session_even_when_editor_stop_fails(client):
+    browser, app, _ = client
+    csrf = login(browser)
+    browser.post("/api/mode", json={"mode": "editing"}, headers=mutation(browser, csrf))
+    token = browser.cookies.get("mwsb_session")
+    class FailingStop(Editor):
+        def stop(self):
+            raise RuntimeError("Graceful editor shutdown timed out")
+    app.state.controller.editor = FailingStop("running")
+    response = browser.post("/api/logout", headers=mutation(browser, csrf))
+    assert response.status_code == 200
+    assert response.json()["authenticated"] is False
+    assert isinstance(response.json()["warning"], str)
+    assert app.state.auth.session(token) is None
+    assert browser.get("/api/session").status_code == 401
+    assert app.state.controller.status()["mode"] == "error"
+    assert app.state.controller.editor.state == "running"
+    with pytest.raises(UnsafeOperation):
+        app.state.controller.sync()
+
+
+def test_logout_revokes_session_when_controller_lock_is_busy(client):
+    browser, app, _ = client
+    csrf = login(browser)
+    browser.post("/api/mode", json={"mode": "editing"}, headers=mutation(browser, csrf))
+    token = browser.cookies.get("mwsb_session")
+    with app.state.controller.exclusive():
+        response = browser.post("/api/logout", headers=mutation(browser, csrf))
+    assert response.status_code == 200
+    assert response.json()["authenticated"] is False
+    assert response.json()["warning"]
+    assert app.state.auth.session(token) is None
+
+
+def test_editor_helper_allows_bounded_graceful_shutdown_timeout(monkeypatch):
+    import subprocess
+    from mwsecondbrain.controller import EditorHelper
+    timeouts = []
+    def run(command, **options):
+        timeouts.append(options["timeout"])
+        return subprocess.CompletedProcess(command, 0, '{"state":"stopped"}')
+    monkeypatch.setattr(subprocess, "run", run)
+    EditorHelper().stop()
+    assert timeouts == [120]
