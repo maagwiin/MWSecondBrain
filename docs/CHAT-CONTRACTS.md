@@ -8,7 +8,7 @@ All endpoints require the existing session. Mutations use the existing Origin an
 
 - `GET /api/chat?conversation_id=...`: `{conversation_id, capture_paused, messages, jobs, operations}`. Without an ID, returns the active conversation. Messages: `{id, role, content, origin, status, created_at, attachments}`; origin is `web` or `telegram`; status is `queued`, `running`, `completed`, `failed`, `cancelled` or `uncertain`.
 - `GET /api/chat/conversations`: `{conversations:[{id,created_at,active}]}`.
-- `POST /api/chat/messages`: `{text, attachment_ids:[], model:null, idempotency_key, no_capture:false}`. `no_capture` is an optional strict boolean. Returns `{job_id,message_id}` with 202. Same key returns the existing result without changing its capture decision.
+- `POST /api/chat/messages`: `{text, attachment_ids:[], model:null, idempotency_key, no_capture:false, conversation_id:null}`. `no_capture` is an optional strict boolean. The web UI sends its displayed conversation ID; the enqueue transaction rejects a stale ID before inserting anything (HTTP 400). Omitting the ID preserves compatibility and targets the active conversation, including Telegram. Same idempotency key returns the existing `{job_id,message_id}` with 202 without changing its capture decision.
 - `POST /api/chat/cancel`: `{job_id}`; requests interruption and returns `{cancel_requested:true}`.
 - `POST /api/chat/new`: starts a new active conversation after cancelling any active turn; `{conversation_id}`. Old history remains readable.
 - `POST /api/chat/capture`: `{paused:boolean}`. Persisted for the active conversation. Enqueue atomically records `capture_denied` when the conversation is paused, `no_capture` is true, or the text explicitly says “não guarde”. Resuming capture before execution cannot remove that turn's denial.
@@ -18,6 +18,8 @@ All endpoints require the existing session. Mutations use the existing Origin an
 - `GET /api/attachments/{id}`: authenticated download with safe Content-Disposition. Attachment IDs, not client paths, select stored files.
 
 The UI must show queue, progressive response, source, attachment state and note-operation state. Job `error` and note-operation `error`/`reason` remain visible. Queued message attachments can be string IDs until the worker enriches their metadata; rendering and retry preserve those IDs. Jobs expose boolean `capture_denied`; an explicit uncertain retry submits that decision as `no_capture`. Uncertain jobs never replay automatically and do not permanently disable new explicit sends. Historical conversations disable the composer and capture controls because those mutations target the active conversation.
+
+Conversation events refresh the active-conversation list even when another tab creates a different conversation. `ChatStore.enqueue` accepts optional `conversation_id=None` after `no_capture`; when supplied, it must equal the active conversation within the insertion transaction.
 
 ## Runtime ownership
 

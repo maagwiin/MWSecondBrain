@@ -145,6 +145,39 @@ def test_new_conversation_cancels_old_queue_and_preserves_history(context):
     assert len(store.conversations()) == 2
 
 
+def test_enqueue_rejects_stale_conversation_without_insert(context):
+    _, database, _ = context
+    store = ChatStore(database)
+    old = store.view()["conversation_id"]
+    new = store.new_conversation()
+    with pytest.raises(ValueError, match="Conversation is no longer active"):
+        store.enqueue("stale tab", "web", "stale", conversation_id=old)
+    assert store.view(new)["messages"] == []
+    assert store.view(old)["messages"] == []
+    assert store.events_after(0)[-1]["type"] == "conversation"
+    accepted = store.enqueue("current tab", "web", "current", conversation_id=new)
+    assert store.enqueue("idempotent", "web", "current", conversation_id=new) == accepted
+    store.enqueue("telegram active", "telegram", "telegram")
+    assert [message["content"] for message in store.view(new)["messages"]] == ["current tab", "telegram active"]
+
+
+def test_chat_http_rejects_stale_conversation_after_new(context):
+    settings, _, _ = context
+    app = create_app(settings, editor=Editor(), runtime=Runtime(), runtime_verified=True, scheduler_enabled=False, chat_worker_enabled=False)
+    app.state.auth.set_password("strong local password")
+    with TestClient(app, base_url=settings.public_origin) as browser:
+        login = browser.post("/api/login", json={"password": "strong local password"}, headers={"Origin": settings.public_origin})
+        headers = {"Origin": settings.public_origin, "X-CSRF-Token": login.json()["csrf_token"]}
+        old = browser.get("/api/chat").json()["conversation_id"]
+        new = browser.post("/api/chat/new", json={}, headers=headers).json()["conversation_id"]
+        rejected = browser.post("/api/chat/messages", json={"text": "stale", "idempotency_key": "stale", "conversation_id": old}, headers=headers)
+        assert rejected.status_code == 400
+        assert rejected.json()["detail"] == "Invalid chat request"
+        assert browser.get("/api/chat").json()["messages"] == []
+        accepted = browser.post("/api/chat/messages", json={"text": "current", "idempotency_key": "current", "conversation_id": new}, headers=headers)
+        assert accepted.status_code == 202
+
+
 def test_outbox_claim_is_durable_and_never_blindly_replayed(context):
     _, database, controller = context
     store = ChatStore(database)

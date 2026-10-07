@@ -478,6 +478,7 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
           model: modelSelect?.value || null,
           idempotency_key: crypto.randomUUID(),
           no_capture: dontCapture,
+          conversation_id: snapshot?.conversation_id,
         }),
       });
       if (streamingJobId !== result.job_id) {
@@ -608,6 +609,11 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
 
   function handleEvent(event: EventPayload): void {
     if (event.id) lastEventId = event.id;
+    if (event.type === 'conversation') {
+      void loadConversationList().catch(error => {
+        if (error instanceof Error && error.message !== 'Sessão encerrada.') setAlert(error.message);
+      });
+    }
     if (event.conversation_id !== snapshot?.conversation_id) return;
     if (event.job_id && event.delta) {
       if (streamingJobId !== event.job_id) streamingText = '';

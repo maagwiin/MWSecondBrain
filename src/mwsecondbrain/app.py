@@ -42,6 +42,7 @@ class ChatBody(BaseModel):
     model: str | None = Field(default=None, max_length=128)
     idempotency_key: str = Field(min_length=1, max_length=256)
     no_capture: bool = False
+    conversation_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class CancelBody(BaseModel):
@@ -271,7 +272,7 @@ def create_app(settings=None, *, sync_callback=None, backup_callback=None,
                 attachments.metadata(identifier)
         if body.model and worker.catalog and body.model not in {model["id"] for model in worker.catalog}:
             raise HTTPException(400, "Model is not in the account catalog")
-        return store.enqueue(body.text, "web", body.idempotency_key, body.attachment_ids, body.model, no_capture=body.no_capture)
+        return store.enqueue(body.text, "web", body.idempotency_key, body.attachment_ids, body.model, no_capture=body.no_capture, conversation_id=body.conversation_id)
 
     @app.post("/api/chat/cancel")
     def cancel_chat(body: CancelBody, current=Depends(require_mutation)):

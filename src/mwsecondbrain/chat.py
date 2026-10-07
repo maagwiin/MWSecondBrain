@@ -55,7 +55,7 @@ class ChatStore:
         self._event(connection, "conversation", identifier)
         return identifier
 
-    def enqueue(self, text, origin, idempotency_key, attachment_ids=None, model=None, external_reply=None, no_capture=False):
+    def enqueue(self, text, origin, idempotency_key, attachment_ids=None, model=None, external_reply=None, no_capture=False, conversation_id=None):
         if not isinstance(text, str) or len(text) > 32768 or origin not in {"web", "telegram"}:
             raise ValueError("Invalid chat message")
         if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 256:
@@ -69,12 +69,16 @@ class ChatStore:
             raise ValueError("Invalid model")
         if not isinstance(no_capture, bool):
             raise ValueError("Invalid capture opt-out")
+        if conversation_id is not None and (not isinstance(conversation_id, str) or not 1 <= len(conversation_id) <= 64):
+            raise ValueError("Invalid conversation ID")
         now = timestamp(self.clock)
         with self.database.connect(immediate=True) as connection:
             existing = connection.execute("SELECT id,message_id FROM chat_jobs WHERE origin=? AND idempotency_key=?", (origin, idempotency_key)).fetchone()
             if existing:
                 return {"job_id": existing[0], "message_id": existing[1]}
             conversation = self._active(connection)
+            if conversation_id is not None and conversation_id != conversation:
+                raise ValueError("Conversation is no longer active; select the active conversation")
             job_id, message_id = uuid.uuid4().hex, uuid.uuid4().hex
             capture_paused = connection.execute("SELECT capture_paused FROM chat_conversations WHERE id=?", (conversation,)).fetchone()[0]
             capture_denied = bool(no_capture or capture_paused or re.search(r"\b(?:não|nao)\s+guarde\b", text.casefold()))

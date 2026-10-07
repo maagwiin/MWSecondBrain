@@ -104,11 +104,12 @@ test('shows progressive SSE response with atomic one-turn capture opt-out', asyn
   await expect(page.getByLabel('Modelo da conta')).toBeEnabled();
   await page.getByLabel('Modelo da conta').selectOption('account-model-1');
   await page.route('**/api/chat/messages', async route => {
-    const body = route.request().postDataJSON() as { text: string; model: string | null; idempotency_key: string; no_capture: boolean };
+    const body = route.request().postDataJSON() as { text: string; model: string | null; idempotency_key: string; no_capture: boolean; conversation_id: string };
     expect(body.text).toBe('Uma pergunta sem captura de nota');
     expect(body.model).toBe('account-model-1');
     expect(body.idempotency_key).toBeTruthy();
     expect(body.no_capture).toBe(true);
+    expect(body.conversation_id).toBe('conv-1');
     capturePausedDuringSend = state.capture_paused;
     state.jobs = [{ id: 'job-1', status: 'running', origin: 'web', message_id: 'msg-new' }];
     await route.fulfill({ status: 202, json: { job_id: 'job-1', message_id: 'msg-new' } });
@@ -283,6 +284,32 @@ test('disables composer and capture controls while reading historical conversati
   await expect(page.getByRole('button', { name: 'Captura de notas ativa' })).toBeDisabled();
   await expect(page.getByLabel('Não guarde esta mensagem')).toBeDisabled();
   await expect(page.locator('#chat-attachment')).toBeDisabled();
+});
+
+test('refreshes active conversation after another tab creates a conversation', async ({ page }) => {
+  let releaseEvent!: () => void;
+  const eventGate = new Promise<void>(resolve => { releaseEvent = resolve; });
+  await setupChat(page, { events: async route => {
+    await eventGate;
+    await route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'id: 90\ndata: {"type":"conversation","conversation_id":"conv-new"}\n\n' });
+  } });
+  await expect(page.getByRole('textbox', { name: 'Mensagem para Gepeto' })).toBeEnabled();
+  await page.getByRole('textbox', { name: 'Mensagem para Gepeto' }).fill('Rascunho da conversa anterior');
+  let conversationRefreshes = 0;
+  await page.route('**/api/chat/conversations', async route => {
+    conversationRefreshes += 1;
+    await route.fulfill({ json: { conversations: [
+      { id: 'conv-new', created_at: '2026-10-07T13:00:00Z', active: true },
+      { id: 'conv-1', created_at: '2026-10-07T12:00:00Z', active: false },
+    ] } });
+  });
+  releaseEvent();
+  await expect.poll(() => conversationRefreshes).toBeGreaterThan(0);
+  await expect(page.getByRole('combobox', { name: 'Selecionar conversa' })).toHaveValue('conv-1');
+  await expect(page.getByRole('textbox', { name: 'Mensagem para Gepeto' })).toHaveValue('Rascunho da conversa anterior');
+  await expect(page.getByRole('textbox', { name: 'Mensagem para Gepeto' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Enviar', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Captura de notas ativa' })).toBeDisabled();
 });
 
 for (const runtimeState of ['paused_quota', 'auth_required']) {
