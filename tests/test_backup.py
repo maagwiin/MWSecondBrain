@@ -68,6 +68,29 @@ class BackupTests(unittest.TestCase):
             backup(self.vault, self.state, self.archives)
         self.assertEqual(set(self.archives.iterdir()), before)
 
+    def test_obsidian_runtime_files_excluded_but_settings_preserved(self):
+        config = self.root / 'config'
+        self.put(config, '.config/obsidian/preferences.json')
+        (config / '.XDG').mkdir()
+        os.mkfifo(config / '.XDG/wayland-1')
+        with patch.dict(os.environ, MWSB_OBSIDIAN_CONFIG_DIR=str(config)):
+            result = backup(self.vault, self.state, self.archives)
+        with tarfile.open(result['archive']) as archive:
+            self.assertIn('obsidian/.config/obsidian/preferences.json', archive.getnames())
+            self.assertFalse(any('/.XDG/' in name for name in archive.getnames()))
+        (self.vault / '.XDG').mkdir()
+        os.mkfifo(self.vault / '.XDG/unexpected')
+        with self.assertRaises(BackupError):
+            backup(self.vault, self.state, self.archives)
+
+    def test_unreadable_subdirectory_cannot_produce_successful_backup(self):
+        def unreadable(*args, **kwargs):
+            kwargs['onerror'](PermissionError('blocked'))
+            return iter(())
+        with patch('mwsecondbrain.backup.os.walk', side_effect=unreadable), self.assertRaises(BackupError):
+            backup(self.vault, self.state, self.archives)
+        self.assertFalse(list(self.archives.glob('*.tar.gz')))
+
     def malicious(self, name, kind=None, manifest=None):
         path = self.root / 'malicious.tar.gz'
         with tarfile.open(path, 'w:gz') as archive:

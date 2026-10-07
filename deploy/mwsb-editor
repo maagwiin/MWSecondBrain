@@ -6,6 +6,8 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 
 CONTAINER = "mwsb-obsidian"
 
@@ -28,20 +30,32 @@ def running_app():
     return result.returncode == 0
 
 
+def wait_ready():
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen('http://127.0.0.1:8766/obsidian/', timeout=2) as response:
+                if response.status == 200 and b'<html' in response.read(2048).lower() and running_app():
+                    return
+        except (OSError, urllib.error.URLError):
+            pass
+        time.sleep(0.5)
+    raise RuntimeError('Editor did not become ready; vault stays locked')
+
+
 def stop():
     if state() != "running":
         return
     if running_app():
-        windows = docker("exec", "-u", "abc", "-e", "DISPLAY=:1", CONTAINER,
-                         "xdotool", "search", "--onlyvisible", "--class", "obsidian")
-        if windows.returncode or not windows.stdout.split():
-            raise RuntimeError("Save and close Obsidian before releasing the vault")
-        window = windows.stdout.split()[-1].decode("ascii")
-        if not window.isdigit():
-            raise RuntimeError("Invalid application window")
-        requested = docker("exec", "-u", "abc", "-e", "DISPLAY=:1", CONTAINER,
-                           "timeout", "8", "xdotool", "windowactivate", "--sync", window,
-                           "key", "--clearmodifiers", "ctrl+q")
+        wayland = docker("exec", CONTAINER, "printenv", "PIXELFLUX_WAYLAND")
+        if wayland.returncode == 0 and wayland.stdout.strip().lower() == b"true":
+            # The pinned image runs Obsidian in the nested app compositor.
+            # If it is not focused, the exit check below keeps the vault locked.
+            requested = docker("exec", "-u", "abc", "-e", "XDG_RUNTIME_DIR=/config/.XDG",
+                               "-e", "WAYLAND_DISPLAY=wayland-0", CONTAINER,
+                               "timeout", "8", "wtype", "-M", "ctrl", "-k", "q", "-m", "ctrl")
+        else:
+            requested = close_x11()
         if requested.returncode:
             raise RuntimeError("Graceful close request failed")
         deadline = time.monotonic() + 20
@@ -54,6 +68,19 @@ def stop():
         raise RuntimeError("Cannot confirm container exit")
 
 
+def close_x11():
+    windows = docker("exec", "-u", "abc", "-e", "DISPLAY=:1", CONTAINER,
+                     "xdotool", "search", "--onlyvisible", "--class", "obsidian")
+    if windows.returncode or not windows.stdout.split():
+        raise RuntimeError("Save and close Obsidian before releasing the vault")
+    window = windows.stdout.split()[-1].decode("ascii")
+    if not window.isdigit():
+        raise RuntimeError("Invalid application window")
+    return docker("exec", "-u", "abc", "-e", "DISPLAY=:1", CONTAINER,
+                  "timeout", "8", "xdotool", "windowactivate", "--sync", window,
+                  "key", "--clearmodifiers", "ctrl+q")
+
+
 def main():
     if len(sys.argv) != 2 or sys.argv[1] not in {"status", "start", "stop"}:
         return 2
@@ -61,10 +88,12 @@ def main():
     try:
         # Root retains this lock even if the unprivileged caller times out.
         # status must report unknown while a lifecycle operation is in flight.
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        operation_lock = fcntl.LOCK_SH if sys.argv[1] == 'status' else fcntl.LOCK_EX
+        fcntl.flock(descriptor, operation_lock | fcntl.LOCK_NB)
         if sys.argv[1] == "start" and state() == "stopped":
             if docker("start", CONTAINER, timeout=None).returncode:
                 raise RuntimeError("Editor start failed")
+            wait_ready()
         elif sys.argv[1] == "stop":
             stop()
         current = state()

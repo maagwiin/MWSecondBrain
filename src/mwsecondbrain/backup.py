@@ -44,14 +44,20 @@ def _root(path: Path) -> Path:
     return path.resolve()
 
 
-def _copy_tree(source: Path, target: Path, sqlite: bool = False) -> None:
+def _copy_tree(source: Path, target: Path, sqlite: bool = False, excluded_roots=()) -> None:
     if not source.is_dir():
         raise BackupError(f'Source directory does not exist: {source}')
-    for directory, dirs, files in os.walk(source, followlinks=False):
+    def walk_failed(error):
+        raise BackupError('Source directory could not be read completely') from error
+    for directory, dirs, files in os.walk(source, followlinks=False, onerror=walk_failed):
         base = Path(directory)
         for name in dirs + files:
             path = base / name
             relative = path.relative_to(source)
+            if relative.parts[0] in excluded_roots:
+                if name in dirs:
+                    dirs.remove(name)
+                continue
             # Reject links even when their names would otherwise be excluded.
             mode = path.lstat().st_mode
             if stat.S_ISLNK(mode):
@@ -141,7 +147,9 @@ def backup(vault: Path, state_dir: Path, backup_dir: Path) -> dict:
         payload = staging / 'payload'
         payload.mkdir()
         for source, prefix in sources:
-            _copy_tree(source, payload / prefix, sqlite=prefix == 'state')
+            # Desktop runtime sockets and rebuildable caches are not settings.
+            _copy_tree(source, payload / prefix, sqlite=prefix == 'state',
+                       excluded_roots=('.XDG', '.cache') if prefix == 'obsidian' else ())
         files = {path.relative_to(payload).as_posix(): _checksum(path)
                  for path in sorted(payload.rglob('*')) if path.is_file()}
         manifest = {'version': 1, 'producer': 'mwsecondbrain',

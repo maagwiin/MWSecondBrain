@@ -11,6 +11,8 @@ file header and copied with SQLite's online backup API. Committed WAL data is
 included; WAL, SHM and journal sidecars are excluded. Snapshot databases use
 DELETE journal mode. Optional `MWSB_OBSIDIAN_CONFIG_DIR` adds the configured
 Obsidian directory. It must exist and must not be a symlink.
+Its top-level `.XDG` runtime sockets and `.cache` are excluded; persistent
+`.config` settings and vault `.obsidian` files remain included.
 
 Archive paths retain `vault/`, `state/`, and optional `obsidian/` prefixes.
 `manifest.json` records creation time and SHA-256 checksums for every payload
