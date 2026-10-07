@@ -8,7 +8,7 @@ type Message = {
   origin: Origin;
   status: string;
   created_at: string;
-  attachments: Attachment[];
+  attachments: (Attachment | string)[];
 };
 type Job = {
   id: string;
@@ -17,6 +17,8 @@ type Job = {
   created_at?: string;
   message_id?: string;
   message?: string;
+  error?: string;
+  capture_denied?: boolean;
 };
 type NoteOperation = {
   id: string;
@@ -24,6 +26,8 @@ type NoteOperation = {
   path?: string;
   message?: string;
   title?: string;
+  error?: string;
+  reason?: string;
 };
 type Conversation = { id: string; created_at: string; active: boolean };
 type ChatSnapshot = {
@@ -65,6 +69,12 @@ function labelStatus(status: string): string {
 
 function isActive(status: string): boolean {
   return status === 'queued' || status === 'running';
+}
+
+function normalizeAttachment(attachment: Attachment | string): Attachment {
+  return typeof attachment === 'string'
+    ? { id: attachment, name: 'Anexo enviado', mime: '', size: 0, status: 'queued' }
+    : attachment;
 }
 
 export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
@@ -127,6 +137,10 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
   alert.hidden = true;
   const runtimeNotice = node('div', 'runtime-notice');
   runtimeNotice.hidden = true;
+  const resumeButton = node('button', 'chat-button chat-button-quiet', 'Retomar Gepeto');
+  resumeButton.type = 'button';
+  const historyNotice = node('p', 'model-notice', 'Histórico somente leitura. Selecione a conversa ativa para enviar mensagens.');
+  historyNotice.hidden = true;
   const modelNotice = node('div', 'model-notice');
   modelNotice.hidden = true;
   const transcript = node('div', 'chat-transcript');
@@ -165,7 +179,7 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
   composerTools.append(noCaptureLabel, sendRow);
   composer.append(fileInput, textArea, attachmentTray, attachLabel, composerTools);
 
-  mainColumn.append(chatHeading, modelNotice, runtimeNotice, alert, transcript, operationsPanel, composer);
+  mainColumn.append(chatHeading, modelNotice, runtimeNotice, historyNotice, alert, transcript, operationsPanel, composer);
   layout.append(sidebar, mainColumn);
   page.append(topbar, layout);
   root.replaceChildren(page);
@@ -178,16 +192,26 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
   function updateControls(): void {
     const unavailable = !catalog.ready;
     const activeJob = snapshot?.jobs.find(job => isActive(job.status));
-    const uncertainJob = snapshot?.jobs.find(job => job.status === 'uncertain');
-    const blocked = actionBusy || unavailable || Boolean(activeJob || uncertainJob);
+    const historical = isHistorical();
+    const blocked = actionBusy || unavailable || Boolean(activeJob) || historical;
     sendButton.disabled = blocked;
-    sendButton.textContent = actionBusy ? 'Aguarde…' : activeJob ? 'Aguarde a fila' : uncertainJob ? 'Confirme nova tentativa' : 'Enviar';
-    textArea.disabled = actionBusy || unavailable || Boolean(activeJob || uncertainJob);
-    fileInput.disabled = actionBusy || unavailable || Boolean(activeJob || uncertainJob);
+    sendButton.textContent = actionBusy ? 'Aguarde…' : activeJob ? 'Aguarde a fila' : 'Enviar';
+    textArea.disabled = blocked;
+    fileInput.disabled = blocked;
+    noCapture.disabled = blocked;
     attachLabel.setAttribute('aria-disabled', String(fileInput.disabled));
-    captureControl.disabled = actionBusy;
+    captureControl.disabled = actionBusy || historical;
+    historyNotice.hidden = !historical;
+    resumeButton.disabled = actionBusy;
+    const modelSelect = composer.querySelector<HTMLSelectElement>('#chat-model-select');
+    if (modelSelect) modelSelect.disabled = blocked || catalog.models.length === 0;
     newConversation.disabled = actionBusy;
     history.disabled = actionBusy;
+  }
+
+  function isHistorical(): boolean {
+    const active = conversations.find(conversation => conversation.active);
+    return Boolean(active && snapshot && snapshot.conversation_id !== active.id);
   }
 
   function showModelState(): void {
@@ -233,11 +257,13 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
     }
   }
 
-  function addAttachmentLink(parent: HTMLElement, attachment: Attachment): void {
-    const link = node('a', 'attachment-link', `↧ ${attachment.name} · ${formatSize(attachment.size)}`);
+  function addAttachmentLink(parent: HTMLElement, reference: Attachment | string): void {
+    const attachment = normalizeAttachment(reference);
+    const link = node('a', 'attachment-link', `↧ ${attachment.name}${attachment.size ? ` · ${formatSize(attachment.size)}` : ''}`);
     link.href = `/api/attachments/${encodeURIComponent(attachment.id)}`;
     link.setAttribute('aria-label', `Baixar anexo ${attachment.name}`);
     parent.append(link);
+    if (attachment.message) parent.append(node('span', 'attachment-warning', attachment.message));
   }
 
   function renderMessages(): void {
@@ -296,6 +322,7 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
       row.append(node('strong', '', title), node('span', `queue-status queue-${job.status}`, labelStatus(job.status)));
       item.append(row, node('time', '', formatDate(job.created_at)));
       if (job.message) item.append(node('p', 'queue-message', job.message));
+      if (job.error) item.append(node('p', 'queue-message', job.error));
       if (isActive(job.status)) {
         const cancel = node('button', 'text-button', 'Cancelar resposta');
         cancel.type = 'button';
@@ -309,7 +336,7 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
       } else if (job.status === 'uncertain') {
         const retry = node('button', 'text-button', 'Tentar novamente');
         retry.type = 'button';
-        retry.disabled = actionBusy;
+        retry.disabled = actionBusy || isHistorical() || Boolean(activeJob());
         retry.addEventListener('click', () => void explicitRetry(job));
         item.append(retry, node('p', 'uncertain-note', 'A execução anterior pode ter começado. Nada será repetido sem sua confirmação.'));
       }
@@ -331,6 +358,8 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
       const title = operation.title || operation.path || 'Sugestão de nota';
       item.append(node('strong', '', title), node('span', `operation-state operation-${operation.status}`, labelStatus(operation.status)));
       if (operation.message) item.append(node('p', 'operation-message', operation.message));
+      if (operation.reason) item.append(node('p', 'operation-message', operation.reason));
+      if (operation.error) item.append(node('p', 'operation-message', operation.error));
       fragment.append(item);
     }
     operationsList.replaceChildren(fragment);
@@ -343,7 +372,8 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
     captureControl.querySelector('.capture-label')!.textContent = snapshot.capture_paused
       ? 'Captura de notas pausada' : 'Captura de notas ativa';
     runtimeNotice.hidden = !snapshot.runtime?.reason && !snapshot.runtime?.state;
-    runtimeNotice.textContent = snapshot.runtime?.reason || `Runtime: ${labelStatus(snapshot.runtime?.state ?? 'ready')}`;
+    runtimeNotice.replaceChildren(node('span', '', snapshot.runtime?.reason || `Runtime: ${labelStatus(snapshot.runtime?.state ?? 'ready')}`));
+    if (['paused_quota', 'auth_required', 'paused'].includes(snapshot.runtime?.state ?? '')) runtimeNotice.append(resumeButton);
     renderConversations();
     renderMessages();
     renderOperations();
@@ -369,6 +399,7 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
     }
     for (const attachment of readyAttachments) {
       const item = node('span', 'pending-attachment uploaded-attachment', `${attachment.name} · ${formatSize(attachment.size)} · Enviado`);
+      if (attachment.message) item.append(node('span', 'attachment-warning', attachment.message));
       const remove = node('button', 'remove-attachment', 'Remover');
       remove.type = 'button';
       remove.setAttribute('aria-label', `Remover ${attachment.name}`);
@@ -395,7 +426,7 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
       }
     } finally {
       actionBusy = false;
-      if (!closed) updateControls();
+      if (!closed) renderQueue();
     }
   }
 
@@ -405,7 +436,7 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
       const form = new FormData();
       form.append('file', file);
       const uploaded = await request<Attachment>('/api/attachments', { method: 'POST', body: form });
-      if (uploaded.status !== 'ready' && uploaded.status !== 'completed') {
+      if (!['ready', 'completed', 'partial'].includes(uploaded.status)) {
         throw new Error(uploaded.message || `O arquivo ${file.name} não ficou pronto para envio.`);
       }
       readyAttachments.push(uploaded);
@@ -427,17 +458,12 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
     }
   }
 
-  async function submitMessage(text: string, attachments = readyAttachments, dontCapture = noCapture.checked): Promise<void> {
+  async function submitMessage(text: string, attachments: (Attachment | string)[] = readyAttachments, dontCapture = noCapture.checked): Promise<void> {
+    if (isHistorical()) throw new Error('Histórico somente leitura. Selecione a conversa ativa.');
     if (activeJob()) throw new Error('A fila já tem uma resposta em andamento. Aguarde ou cancele antes de enviar.');
     if (!catalog.ready) throw new Error(catalog.reason || 'Nenhum modelo está disponível para esta conta.');
     if (!text.trim() && !attachments.length) throw new Error('Escreva uma mensagem ou anexe um arquivo.');
     await uploadPendingFiles();
-    const conversationWasPaused = snapshot?.capture_paused ?? false;
-    let restoreCapture = false;
-    if (dontCapture && !conversationWasPaused) {
-      await request('/api/chat/capture', { method: 'POST', body: JSON.stringify({ paused: true }) });
-      restoreCapture = true;
-    }
     streamingJobId = '';
     streamingText = '';
     optimisticText = text;
@@ -448,9 +474,10 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
         method: 'POST',
         body: JSON.stringify({
           text,
-          attachment_ids: attachments.map(attachment => attachment.id),
+          attachment_ids: attachments.map(attachment => normalizeAttachment(attachment).id),
           model: modelSelect?.value || null,
           idempotency_key: crypto.randomUUID(),
+          no_capture: dontCapture,
         }),
       });
       if (streamingJobId !== result.job_id) {
@@ -463,9 +490,6 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
       charCount.textContent = '0 / 20.000';
       renderPendingFiles();
     } finally {
-      if (restoreCapture) {
-        await request('/api/chat/capture', { method: 'POST', body: JSON.stringify({ paused: false }) });
-      }
       optimisticText = '';
       if (!closed) await loadSnapshot(snapshot?.conversation_id);
     }
@@ -479,7 +503,7 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
     await runMutation(async () => {
       const source = snapshot?.messages.find(message => message.id === job.message_id && message.role === 'user');
       if (!source) throw new Error('Mensagem original não está disponível para nova tentativa.');
-      await submitMessage(source.content, source.attachments ?? [], false);
+      await submitMessage(source.content, source.attachments ?? [], job.capture_denied ?? true);
     });
   }
 
@@ -489,6 +513,7 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
     const data = await request<ChatSnapshot>(`/api/chat${query}`);
     if (closed || generation !== loadGeneration) return;
     snapshot = data;
+    snapshot.messages = snapshot.messages.map(message => ({ ...message, attachments: (message.attachments ?? []).map(normalizeAttachment) }));
     if (!activeJob() || activeJob()?.status === 'completed') {
       streamingJobId = '';
       streamingText = '';
@@ -501,6 +526,7 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
     if (closed) return;
     conversations = data.conversations;
     renderConversations();
+    renderQueue();
   }
 
   async function loadModels(): Promise<void> {
@@ -551,7 +577,7 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
   }
 
   async function toggleCapture(): Promise<void> {
-    if (!snapshot) return;
+    if (!snapshot || isHistorical()) return;
     await runMutation(async () => {
       await request('/api/chat/capture', {
         method: 'POST',
@@ -652,6 +678,10 @@ export function mountChat(root: HTMLElement, request: ChatRequest): () => void {
   newConversation.addEventListener('click', () => void createConversation());
   history.addEventListener('change', () => void chooseConversation(history.value));
   captureControl.addEventListener('click', () => void toggleCapture());
+  resumeButton.addEventListener('click', () => void runMutation(async () => {
+    await request('/api/chat/resume', { method: 'POST', body: '{}' });
+    await refreshAll(snapshot?.conversation_id);
+  }));
   composer.addEventListener('submit', event => void handleSubmit(event as SubmitEvent));
   fileInput.addEventListener('change', () => void handleFiles());
   textArea.addEventListener('input', () => { charCount.textContent = `${textArea.value.length.toLocaleString('pt-BR')} / 20.000`; });

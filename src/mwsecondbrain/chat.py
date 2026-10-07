@@ -55,7 +55,7 @@ class ChatStore:
         self._event(connection, "conversation", identifier)
         return identifier
 
-    def enqueue(self, text, origin, idempotency_key, attachment_ids=None, model=None, external_reply=None):
+    def enqueue(self, text, origin, idempotency_key, attachment_ids=None, model=None, external_reply=None, no_capture=False):
         if not isinstance(text, str) or len(text) > 32768 or origin not in {"web", "telegram"}:
             raise ValueError("Invalid chat message")
         if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 256:
@@ -67,6 +67,8 @@ class ChatStore:
             raise ValueError("Message cannot be empty")
         if model is not None and (not isinstance(model, str) or not 1 <= len(model) <= 128):
             raise ValueError("Invalid model")
+        if not isinstance(no_capture, bool):
+            raise ValueError("Invalid capture opt-out")
         now = timestamp(self.clock)
         with self.database.connect(immediate=True) as connection:
             existing = connection.execute("SELECT id,message_id FROM chat_jobs WHERE origin=? AND idempotency_key=?", (origin, idempotency_key)).fetchone()
@@ -74,7 +76,8 @@ class ChatStore:
                 return {"job_id": existing[0], "message_id": existing[1]}
             conversation = self._active(connection)
             job_id, message_id = uuid.uuid4().hex, uuid.uuid4().hex
-            capture_denied = bool(re.search(r"\b(?:não|nao)\s+guarde\b", text.casefold()))
+            capture_paused = connection.execute("SELECT capture_paused FROM chat_conversations WHERE id=?", (conversation,)).fetchone()[0]
+            capture_denied = bool(no_capture or capture_paused or re.search(r"\b(?:não|nao)\s+guarde\b", text.casefold()))
             connection.execute("""INSERT INTO chat_jobs
                 (id,conversation_id,message_id,origin,idempotency_key,model,attachment_ids,external_reply,status,capture_denied,created_at,updated_at)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (job_id, conversation, message_id, origin, idempotency_key, model, json.dumps(attachments), json.dumps(external_reply) if external_reply is not None else None, "queued", int(capture_denied), now, now))
@@ -99,11 +102,12 @@ class ChatStore:
                 message["attachments"] = json.loads(message["attachments"])
                 messages.append(message)
             jobs = []
-            for row in connection.execute("""SELECT j.id,j.message_id,j.status,j.origin,j.model,j.error,j.cancel_requested,j.created_at,
+            for row in connection.execute("""SELECT j.id,j.message_id,j.status,j.origin,j.model,j.error,j.cancel_requested,j.capture_denied,j.created_at,
                 o.status AS delivery_status FROM chat_jobs j LEFT JOIN chat_outbox o ON o.job_id=j.id
                 WHERE j.conversation_id=? ORDER BY j.sequence""", (identifier,)):
                 job = dict(row)
                 job["cancel_requested"] = bool(job["cancel_requested"])
+                job["capture_denied"] = bool(job["capture_denied"])
                 jobs.append(job)
             operations = [dict(row) for row in connection.execute("SELECT id,job_id,path,status,reason,error,created_at FROM note_operations WHERE conversation_id=? ORDER BY rowid", (identifier,))]
         return {"conversation_id": identifier, "capture_paused": bool(conversation["capture_paused"]), "messages": messages, "jobs": jobs, "operations": operations, "runtime": self.runtime_state(), "telegram": self.database.get("telegram_status", {"state": "disabled", "message": "Telegram not configured"})}

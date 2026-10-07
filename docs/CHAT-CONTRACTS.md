@@ -8,16 +8,16 @@ All endpoints require the existing session. Mutations use the existing Origin an
 
 - `GET /api/chat?conversation_id=...`: `{conversation_id, capture_paused, messages, jobs, operations}`. Without an ID, returns the active conversation. Messages: `{id, role, content, origin, status, created_at, attachments}`; origin is `web` or `telegram`; status is `queued`, `running`, `completed`, `failed`, `cancelled` or `uncertain`.
 - `GET /api/chat/conversations`: `{conversations:[{id,created_at,active}]}`.
-- `POST /api/chat/messages`: `{text, attachment_ids:[], model:null, idempotency_key}`. Returns `{job_id,message_id}` with 202. Same key returns the existing result.
+- `POST /api/chat/messages`: `{text, attachment_ids:[], model:null, idempotency_key, no_capture:false}`. `no_capture` is an optional strict boolean. Returns `{job_id,message_id}` with 202. Same key returns the existing result without changing its capture decision.
 - `POST /api/chat/cancel`: `{job_id}`; requests interruption and returns `{cancel_requested:true}`.
 - `POST /api/chat/new`: starts a new active conversation after cancelling any active turn; `{conversation_id}`. Old history remains readable.
-- `POST /api/chat/capture`: `{paused:boolean}`. Persisted for the active conversation. Explicit “não guarde” disables capture for that turn as well.
+- `POST /api/chat/capture`: `{paused:boolean}`. Persisted for the active conversation. Enqueue atomically records `capture_denied` when the conversation is paused, `no_capture` is true, or the text explicitly says “não guarde”. Resuming capture before execution cannot remove that turn's denial.
 - `GET /api/chat/events`: authenticated SSE, `data` events `{id,type,conversation_id,job_id?,delta?}`; durable monotonic IDs and `Last-Event-ID` supported. A client may reload `/api/chat` after any event.
 - `GET /api/models`: `{ready,models:[{id,label,supports_images}],reason}`. Only account-catalog models appear; never hard-code development-model names as runtime choices.
-- `POST /api/attachments`: multipart field `file`; returns `{id,name,mime,size,status,message}`. Maximum 10 MiB; PDF text, PNG, JPEG, WebP, TXT and Markdown only.
+- `POST /api/attachments`: multipart field `file`; returns `{id,name,mime,size,status,message}`. Maximum 10 MiB; PDF text, PNG, JPEG, WebP, TXT and Markdown only. `partial` extraction remains usable, with `message` displayed as a warning.
 - `GET /api/attachments/{id}`: authenticated download with safe Content-Disposition. Attachment IDs, not client paths, select stored files.
 
-The UI must show queue, progressive response, source, attachment state and note-operation state. Availability failures remain visible. Uncertain jobs after a restart require an explicit user retry; never replay automatically.
+The UI must show queue, progressive response, source, attachment state and note-operation state. Job `error` and note-operation `error`/`reason` remain visible. Queued message attachments can be string IDs until the worker enriches their metadata; rendering and retry preserve those IDs. Jobs expose boolean `capture_denied`; an explicit uncertain retry submits that decision as `no_capture`. Uncertain jobs never replay automatically and do not permanently disable new explicit sends. Historical conversations disable the composer and capture controls because those mutations target the active conversation.
 
 ## Runtime ownership
 
@@ -29,9 +29,9 @@ Telegram uses long polling, accepts only the configured numeric user in a privat
 
 ## Backend integration
 
-Production enables chat only with `MWSB_CHAT_ENABLED=1`, `MWSB_SUBSCRIPTION_VERIFIED=1` and a dedicated `MWSB_AUTH_DIR`. Telegram polling additionally requires `MWSB_TELEGRAM_ENABLED=1`; test instances never activate external polling by default. The account catalog must also load successfully. Missing optional runtime modules leave phase one available and report chat as unavailable. `POST /api/chat/resume` is an authenticated, CSRF-protected explicit queue resume after reconnecting local authentication or waiting for quota.
+Production enables chat only with `MWSB_CHAT_ENABLED=1`, `MWSB_SUBSCRIPTION_VERIFIED=1` and a dedicated `MWSB_AUTH_DIR`. Telegram polling additionally requires `MWSB_TELEGRAM_ENABLED=1`; test instances never activate external polling by default. The account catalog must also load successfully. Missing optional runtime modules leave phase one available and report chat as unavailable. `POST /api/chat/resume` is an authenticated, CSRF-protected explicit queue resume after reconnecting local authentication or waiting for quota. The UI offers this action for authentication/quota pauses and reloads the model catalog and conversation afterward.
 
-`ChatStore(database).enqueue(text, origin, idempotency_key, attachment_ids=[], model=None, external_reply=None)` returns `{job_id,message_id}`. `lookup_idempotency(key, origin='telegram')` returns that result or `None`. `view(conversation_id=None)` includes runtime and Telegram availability, and job `delivery_status`. `ChatWorker(store,controller,runtime,completion_hook=None,attachments_resolver=None)` accepts the synchronous runtime and dispatches it through `asyncio.to_thread`. The optional completion hook receives `(job,content)` only for Telegram jobs; the durable outbox is preferred.
+`ChatStore(database).enqueue(text, origin, idempotency_key, attachment_ids=[], model=None, external_reply=None, no_capture=False)` returns `{job_id,message_id}`. `lookup_idempotency(key, origin='telegram')` returns that result or `None`. `view(conversation_id=None)` includes runtime and Telegram availability, and job `delivery_status`/`capture_denied`. `ChatWorker(store,controller,runtime,completion_hook=None,attachments_resolver=None)` accepts the synchronous runtime and dispatches it through `asyncio.to_thread`. The optional completion hook receives `(job,content)` only for Telegram jobs; the durable outbox is preferred.
 
 The `chat_outbox` table stores `id`, unique `job_id`, JSON `external_reply`, `content`, `status` and `created_at`. `pending_outbox()` decodes `external_reply`. Before sending, `claim_outbox(id)` atomically changes `pending` to `uncertain`; `mark_outbox_sent(id)` records success. Delivery errors retain uncertainty and are never automatically resent. Both transitions emit delivery events.
 

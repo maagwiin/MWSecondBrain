@@ -4,11 +4,11 @@ const initialChat = () => ({
   conversation_id: 'conv-1',
   capture_paused: false,
   messages: [
-    { id: 'msg-1', role: 'user', content: 'Oi, Gepeto', origin: 'telegram', status: 'completed', created_at: '2026-10-07T12:00:00Z', attachments: [] },
-    { id: 'msg-2', role: 'assistant', content: 'Olá! Posso ajudar.', origin: 'telegram', status: 'completed', created_at: '2026-10-07T12:00:02Z', attachments: [] },
+    { id: 'msg-1', role: 'user', content: 'Oi, Gepeto', origin: 'telegram', status: 'completed', created_at: '2026-10-07T12:00:00Z', attachments: [] as string[] },
+    { id: 'msg-2', role: 'assistant', content: 'Olá! Posso ajudar.', origin: 'telegram', status: 'completed', created_at: '2026-10-07T12:00:02Z', attachments: [] as string[] },
   ],
-  jobs: [] as { id: string; status: string; origin: string; message_id?: string; created_at?: string }[],
-  operations: [{ id: 'op-1', status: 'queued', title: 'Rascunho de nota', message: 'Aguardando confirmação.' }],
+  jobs: [] as { id: string; status: string; origin: string; message_id?: string; created_at?: string; capture_denied?: boolean; error?: string }[],
+  operations: [{ id: 'op-1', status: 'queued', title: 'Rascunho de nota', message: 'Aguardando confirmação.' }] as { id: string; status: string; title?: string; message?: string; reason?: string; error?: string }[],
   runtime: { state: 'ready', reason: '' },
 });
 
@@ -81,11 +81,15 @@ test('clearly blocks sending when account model catalog is unavailable', async (
   await expect(page.getByRole('textbox', { name: 'Mensagem para Gepeto' })).toBeDisabled();
 });
 
-test('shows progressive SSE response after safe model send and restores one-turn capture pause', async ({ page }) => {
+test('shows progressive SSE response with atomic one-turn capture opt-out', async ({ page }) => {
   const state = initialChat();
   let releaseEvent!: () => void;
   const eventGate = new Promise<void>(resolve => { releaseEvent = resolve; });
   let capturePausedDuringSend = false;
+  let captureRequests = 0;
+  page.on('request', request => {
+    if (new URL(request.url()).pathname === '/api/chat/capture') captureRequests += 1;
+  });
   await setupChat(page, {
     chat: state,
     events: async route => {
@@ -100,10 +104,11 @@ test('shows progressive SSE response after safe model send and restores one-turn
   await expect(page.getByLabel('Modelo da conta')).toBeEnabled();
   await page.getByLabel('Modelo da conta').selectOption('account-model-1');
   await page.route('**/api/chat/messages', async route => {
-    const body = route.request().postDataJSON() as { text: string; model: string | null; idempotency_key: string };
+    const body = route.request().postDataJSON() as { text: string; model: string | null; idempotency_key: string; no_capture: boolean };
     expect(body.text).toBe('Uma pergunta sem captura de nota');
     expect(body.model).toBe('account-model-1');
     expect(body.idempotency_key).toBeTruthy();
+    expect(body.no_capture).toBe(true);
     capturePausedDuringSend = state.capture_paused;
     state.jobs = [{ id: 'job-1', status: 'running', origin: 'web', message_id: 'msg-new' }];
     await route.fulfill({ status: 202, json: { job_id: 'job-1', message_id: 'msg-new' } });
@@ -115,9 +120,10 @@ test('shows progressive SSE response after safe model send and restores one-turn
   await page.getByRole('button', { name: 'Enviar' }).click();
 
   await expect(page.getByText('Resposta progressiva')).toBeVisible();
-  await expect.poll(() => capturePausedDuringSend).toBe(true);
+  await expect.poll(() => capturePausedDuringSend).toBe(false);
   await expect.poll(() => state.capture_paused).toBe(false);
   await expect(page.getByRole('button', { name: 'Captura de notas ativa' })).toHaveAttribute('aria-pressed', 'false');
+  expect(captureRequests).toBe(0);
 });
 
 test('cancels active queue job with CSRF and refreshes its state', async ({ page }) => {
@@ -222,3 +228,87 @@ test('returns to login when chat mutation session expires', async ({ page }) => 
   await expect(page.getByRole('alert')).toHaveText('Sua sessão terminou. Entre novamente para continuar.');
   await expect(page.getByRole('heading', { name: 'Gepeto', exact: true })).toHaveCount(0);
 });
+
+test('accepts partially extracted attachment and shows its warning', async ({ page }) => {
+  await setupChat(page);
+  await page.route('**/api/attachments', route => route.fulfill({ json: {
+    id: 'partial-pdf', name: 'longo.pdf', mime: 'application/pdf', size: 30, status: 'partial',
+    message: 'Extração parcial: somente primeiras páginas disponíveis.',
+  } }));
+  let sentIds: string[] = [];
+  await page.route('**/api/chat/messages', async route => {
+    sentIds = route.request().postDataJSON().attachment_ids;
+    await route.fulfill({ status: 202, json: { job_id: 'partial-job', message_id: 'partial-msg' } });
+  });
+  await page.locator('#chat-attachment').setInputFiles({ name: 'longo.pdf', mimeType: 'application/pdf', buffer: Buffer.from('pdf') });
+  await expect(page.getByText('Extração parcial: somente primeiras páginas disponíveis.')).toBeVisible();
+  await page.getByRole('button', { name: 'Enviar' }).click();
+  await expect.poll(() => sentIds).toEqual(['partial-pdf']);
+});
+
+test('retries uncertain ID-only attachments with capture opt-out and unblocks composer', async ({ page }) => {
+  const state = initialChat();
+  state.messages[0].status = 'uncertain';
+  state.messages[0].attachments = ['attachment-queued'];
+  state.jobs = [{ id: 'uncertain-job', status: 'uncertain', origin: 'web', message_id: 'msg-1', capture_denied: true, error: 'Service restarted; explicit retry is required' }];
+  await setupChat(page, { chat: state });
+  await expect(page.getByRole('link', { name: 'Baixar anexo Anexo enviado' })).toHaveAttribute('href', '/api/attachments/attachment-queued');
+  await expect(page.getByText('Service restarted; explicit retry is required')).toBeVisible();
+  const sends: { attachment_ids: string[]; no_capture: boolean }[] = [];
+  await page.route('**/api/chat/messages', async route => {
+    sends.push(route.request().postDataJSON());
+    state.jobs.push({ id: `retry-${sends.length}`, status: 'completed', origin: 'web' });
+    await route.fulfill({ status: 202, json: { job_id: `retry-${sends.length}`, message_id: 'retried-message' } });
+  });
+  await page.getByRole('button', { name: 'Tentar novamente' }).click();
+  await expect.poll(() => sends.length).toBe(1);
+  expect(sends[0].attachment_ids).toEqual(['attachment-queued']);
+  expect(sends[0].no_capture).toBe(true);
+  await expect(page.getByRole('textbox', { name: 'Mensagem para Gepeto' })).toBeEnabled();
+  await page.getByRole('textbox', { name: 'Mensagem para Gepeto' }).fill('Outro assunto');
+  await page.getByRole('button', { name: 'Enviar', exact: true }).click();
+  await expect.poll(() => sends.length).toBe(2);
+  expect(sends[1].no_capture).toBe(false);
+});
+
+test('disables composer and capture controls while reading historical conversation', async ({ page }) => {
+  await setupChat(page);
+  const old = initialChat();
+  old.conversation_id = 'conv-0';
+  await page.route(url => new URL(url).pathname === '/api/chat', route => route.fulfill({ json: old }));
+  await page.getByRole('combobox', { name: 'Selecionar conversa' }).selectOption('conv-0');
+  await expect(page.getByText('Histórico somente leitura. Selecione a conversa ativa para enviar mensagens.')).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Mensagem para Gepeto' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Enviar', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Captura de notas ativa' })).toBeDisabled();
+  await expect(page.getByLabel('Não guarde esta mensagem')).toBeDisabled();
+  await expect(page.locator('#chat-attachment')).toBeDisabled();
+});
+
+for (const runtimeState of ['paused_quota', 'auth_required']) {
+  test(`resumes ${runtimeState} and refreshes account model catalog`, async ({ page }) => {
+    const state = initialChat();
+    state.runtime = { state: runtimeState, reason: 'Autenticação ou quota precisa de atenção.' };
+    state.operations = [{ id: 'rejected-note', status: 'rejected', title: 'Nota recusada', error: 'Capture disabled', reason: 'Pedido privado' }];
+    await setupChat(page, { chat: state, models: { ready: false, models: [], reason: 'Pausado' } });
+    await expect(page.getByText('Capture disabled')).toBeVisible();
+    await expect(page.getByText('Pedido privado')).toBeVisible();
+    let resumed = false;
+    let refreshed = false;
+    await page.route('**/api/chat/resume', async route => {
+      expect(route.request().headers()['x-csrf-token']).toBe('csrf-chat');
+      resumed = true;
+      state.runtime = { state: 'ready', reason: '' };
+      await route.fulfill({ json: { ready: true } });
+    });
+    await page.route('**/api/models', async route => {
+      refreshed = resumed;
+      await route.fulfill({ json: { ready: true, models: [{ id: 'new-account-model', label: 'Modelo atualizado', supports_images: false }], reason: '' } });
+    });
+    await page.getByRole('button', { name: 'Retomar Gepeto' }).click();
+    await expect.poll(() => refreshed).toBe(true);
+    await expect(page.getByLabel('Modelo da conta')).toContainText('Modelo atualizado');
+    await expect(page.getByRole('button', { name: 'Enviar', exact: true })).toBeEnabled();
+    await expect(page.getByRole('button', { name: 'Retomar Gepeto' })).toHaveCount(0);
+  });
+}

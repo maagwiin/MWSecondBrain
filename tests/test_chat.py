@@ -183,14 +183,38 @@ def test_capture_pause_and_explicit_opt_out_deny_proposals(context):
             return "ok"
     store.set_capture(True)
     store.enqueue("guarde", "web", "1")
+    store.set_capture(False)
     worker = ChatWorker(store, controller, CaptureRuntime())
     asyncio.run(worker.process_next())
-    store.set_capture(False)
     store.enqueue("Não guarde esta mensagem", "web", "2")
     asyncio.run(worker.process_next())
+    store.enqueue("pedido sem captura", "web", "3", no_capture=True)
+    asyncio.run(worker.process_next())
+    assert len(outputs) == 3
     assert all(output.get("error") for output in outputs)
+    assert all(job["capture_denied"] is True for job in store.view()["jobs"])
     assert not (controller.settings.vault / "note.md").exists()
     assert store.view()["operations"] == []
+
+
+def test_capture_opt_out_survives_restart_and_idempotent_retry(context):
+    _, database, _ = context
+    store = ChatStore(database)
+    original = store.enqueue("privado", "web", "private", no_capture=True)
+    restarted = ChatStore(Database(database.state_dir))
+    assert restarted.enqueue("retry", "web", "private", no_capture=False) == original
+    assert restarted.view()["jobs"][0]["capture_denied"] is True
+    assert restarted.claim_next()["capture_denied"] == 1
+
+
+def test_capture_pause_is_latched_at_enqueue_even_with_false_opt_out(context):
+    _, database, _ = context
+    store = ChatStore(database)
+    store.set_capture(True)
+    store.enqueue("privado", "telegram", "paused", no_capture=False)
+    store.set_capture(False)
+    assert store.view()["capture_paused"] is False
+    assert store.view()["jobs"][0]["capture_denied"] is True
 
 
 def test_chat_http_requires_auth_csrf_and_verified_runtime(context):
@@ -206,9 +230,11 @@ def test_chat_http_requires_auth_csrf_and_verified_runtime(context):
         assert browser.get("/api/status").json()["phase2"]["ready"] is True
         assert browser.post("/api/chat/messages", json={"text": "hello", "idempotency_key": "1"}).status_code == 403
         headers = {"Origin": settings.public_origin, "X-CSRF-Token": csrf}
-        response = browser.post("/api/chat/messages", json={"text": "hello", "idempotency_key": "1"}, headers=headers)
+        response = browser.post("/api/chat/messages", json={"text": "hello", "idempotency_key": "1", "no_capture": True}, headers=headers)
         assert response.status_code == 202
         assert browser.get("/api/chat").json()["messages"][0]["content"] == "hello"
+        assert browser.get("/api/chat").json()["jobs"][0]["capture_denied"] is True
+        assert browser.post("/api/chat/messages", json={"text": "bad", "idempotency_key": "bad", "no_capture": "false"}, headers=headers).status_code == 422
 
 
 def test_phase_one_remains_available_without_optional_runtime(context):
