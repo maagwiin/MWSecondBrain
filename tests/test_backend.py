@@ -171,10 +171,25 @@ def test_transition_stops_editor_before_sync(settings):
     assert controller.status()["mode"] == "agent"
 
 
-def test_missing_production_adapters_fail_visibly(settings):
+def test_missing_production_adapters_fail_visibly(settings, monkeypatch):
+    def unavailable(*args):
+        raise ImportError("Adapter deliberately unavailable in this test")
+    monkeypatch.setattr("mwsecondbrain.controller.importlib.import_module", unavailable)
     controller = Controller(settings, Database(settings.state_dir), Editor())
     with pytest.raises(UnsafeOperation, match="sync"):
         controller.sync()
+    with pytest.raises(UnsafeOperation, match="backup"):
+        controller.backup()
+
+
+def test_unconfigured_scanner_remains_visible_in_controller_status(settings):
+    controller = Controller(settings, Database(settings.state_dir), Editor(), lambda _: {"state": "NOT_CONFIGURED", "message": "Trusted scanner configuration missing", "pending": True}, lambda *args: {"state": "success"})
+    result = controller.sync()
+    assert result["state"] == "NOT_CONFIGURED"
+    status = controller.status()["sync"]
+    assert status["state"] == "NOT_CONFIGURED"
+    assert status["message"] == "Trusted scanner configuration missing"
+    assert status["last_synced_at"] is None
 
 
 def test_phase2_is_unavailable_and_health_has_no_private_data(client):
