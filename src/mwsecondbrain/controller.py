@@ -110,6 +110,7 @@ class Controller:
                 if mode in {"editing", "transition"}:
                     # A restart cannot renew old editing authority or resume unfinished writes.
                     self.database.set("mode", "error")
+                    self.database.set("backup_required", True)
                     try:
                         self.editor.stop()
                     except Exception:
@@ -117,6 +118,7 @@ class Controller:
                     self._editor_state()
                 elif mode != "agent" or self._editor_state() != "stopped":
                     self.database.set("mode", "error")
+                    self.database.set("backup_required", True)
         except UnsafeOperation:
             # The other process owns recovery; this instance may only observe.
             pass
@@ -124,6 +126,7 @@ class Controller:
     def _require_stopped(self):
         if self._editor_state() != "stopped":
             self.database.set("mode", "error")
+            self.database.set("backup_required", True)
             raise UnsafeOperation("Editor is running or its writer state is unknown")
 
     def _require_agent(self):
@@ -147,8 +150,10 @@ class Controller:
             self.database.set("sync", {"state": "error", "message": "Synchronization failed", "last_synced_at": self.database.get("sync", {}).get("last_synced_at")})
             raise UnsafeOperation("Synchronization failed") from None
         previous = self.database.get("sync", {})
+        confirmed = (result["state"].upper() == "SYNCED" and result.get("pending") is False
+                     and bool(result.get("head")) and result.get("remote_checked_now") is True)
         status = {"state": result["state"], "message": str(result.get("message", "")),
-                  "last_synced_at": self._timestamp() if result["state"] == "synced" else previous.get("last_synced_at")}
+                  "last_synced_at": self._timestamp() if confirmed else previous.get("last_synced_at")}
         self.database.set("sync", status)
         return result
 
@@ -157,6 +162,20 @@ class Controller:
             self._require_agent()
             return self._sync()
 
+    def _backup(self):
+        self._require_stopped()
+        try:
+            result = self.backup_callback(self.settings.vault, self.settings.state_dir, self.settings.backup_dir)
+            if not isinstance(result, dict) or result.get("state") not in {"ok", "success", "saved"}:
+                raise ValueError("Backup success was not confirmed")
+        except UnsafeOperation:
+            raise
+        except Exception:
+            raise UnsafeOperation("Backup failed") from None
+        self.database.set("backup", {"last_success_at": self._timestamp()})
+        self.database.set("backup_required", False)
+        return result
+
     def backup(self, *, scheduled_day=None):
         with self.exclusive():
             self._require_agent()
@@ -164,17 +183,7 @@ class Controller:
                 if self.database.get("backup_attempt_day") == scheduled_day:
                     return None
                 self.database.set("backup_attempt_day", scheduled_day)
-            try:
-                result = self.backup_callback(self.settings.vault, self.settings.state_dir, self.settings.backup_dir)
-                if not isinstance(result, dict):
-                    raise ValueError("Invalid backup result")
-            except UnsafeOperation:
-                raise
-            except Exception:
-                raise UnsafeOperation("Backup failed") from None
-            if result.get("state") in {"ok", "success", "saved"}:
-                self.database.set("backup", {"last_success_at": self._timestamp()})
-            return result
+            return self._backup()
 
     def change_mode(self, target):
         if target not in {"agent", "editing"}:
@@ -194,10 +203,13 @@ class Controller:
                 if old == "editing" or target == "agent":
                     self.editor.stop()
                 self._require_stopped()
+                if target == "agent" and (old == "editing" or self.database.get("backup_required", False)):
+                    self._backup()
                 self._sync()
                 if target == "editing":
                     if not self.editor.available:
                         raise UnsafeOperation("Editor helper unavailable")
+                    self.database.set("backup_required", True)
                     self.editor.start()
                     if self._editor_state() != "running":
                         raise UnsafeOperation("Editor start was not confirmed")

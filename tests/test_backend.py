@@ -137,10 +137,10 @@ def test_controller_never_writes_with_unconfirmed_editor(settings, state):
 def test_controller_restart_while_editing_recovers_fail_closed(settings):
     editor = Editor()
     database = Database(settings.state_dir)
-    first = Controller(settings, database, editor, lambda _: {"state": "synced", "pending": False}, lambda *args: {})
+    first = Controller(settings, database, editor, lambda _: {"state": "synced", "pending": False}, lambda *args: {"state": "success"})
     first.change_mode("editing")
     assert first.status()["mode"] == "editing"
-    second = Controller(settings, Database(settings.state_dir), editor, lambda _: {"state": "synced", "pending": False}, lambda *args: {})
+    second = Controller(settings, Database(settings.state_dir), editor, lambda _: {"state": "synced", "pending": False}, lambda *args: {"state": "success"})
     assert second.status()["mode"] == "error"
     assert editor.state == "stopped"
     second.change_mode("agent")
@@ -162,7 +162,7 @@ def test_transition_stops_editor_before_sync(settings):
         events.append("sync")
         assert editor.state == "stopped"
         return {"state": "synced", "pending": False}
-    controller = Controller(settings, Database(settings.state_dir), editor, sync, lambda *args: {})
+    controller = Controller(settings, Database(settings.state_dir), editor, sync, lambda *args: {"state": "success"})
     controller.change_mode("editing")
     assert events.index("sync") < events.index("start")
     events.clear()
@@ -303,6 +303,8 @@ def test_backup_schedule_is_durable_daily_and_defers_while_editing(settings):
     scheduler_tick(controller, now)
     assert calls == []
     controller.change_mode("agent")
+    assert calls == ["backup"]  # Editing recovery has its own required snapshot.
+    calls.clear()
     scheduler_tick(controller, now)
     assert calls == ["backup"]
     scheduler_tick(controller, now + 60)
@@ -362,3 +364,51 @@ def test_validation_errors_preserve_string_detail(client):
     response = browser.post("/api/login", json={"password": []}, headers={"Origin": "https://brain.example.test"})
     assert response.status_code == 422
     assert isinstance(response.json()["detail"], str)
+
+
+def test_confirmed_uppercase_sync_only_updates_timestamp(settings):
+    result = {"state": "SYNCED", "message": "Remote verified", "pending": False, "head": "a" * 40, "remote_checked_now": True}
+    controller = Controller(settings, Database(settings.state_dir), Editor(), lambda _: result, lambda *args: {"state": "success"}, clock=lambda: 1_800_000_000)
+    controller.sync()
+    original = controller.status()["sync"]["last_synced_at"]
+    assert original is not None
+    assert controller.status()["sync"]["state"] == "SYNCED"
+    result["remote_checked_now"] = False
+    controller.clock = lambda: 1_800_000_060
+    controller.sync()
+    assert controller.status()["sync"]["last_synced_at"] == original
+
+
+def test_local_save_without_remote_confirmation_never_sets_sync_timestamp(settings):
+    controller = Controller(settings, Database(settings.state_dir), Editor(), lambda _: {"state": "synced", "pending": False}, lambda *args: {"state": "success"})
+    controller.sync()
+    assert controller.status()["sync"]["last_synced_at"] is None
+
+
+def test_editing_end_backups_saved_vault_before_reconciliation(settings):
+    editor = Editor()
+    calls = []
+    def sync(_):
+        calls.append("sync")
+        return {"state": "SYNCED", "pending": False}
+    def backup(*args):
+        assert editor.state == "stopped"
+        calls.append("backup")
+        return {"state": "success"}
+    controller = Controller(settings, Database(settings.state_dir), editor, sync, backup)
+    controller.change_mode("editing")
+    calls.clear()
+    controller.change_mode("agent")
+    assert calls == ["backup", "sync"]
+
+
+def test_backup_failure_during_editing_end_blocks_sync(settings):
+    calls = []
+    controller = Controller(settings, Database(settings.state_dir), Editor(), lambda _: calls.append("sync") or {"state": "pending", "pending": True}, lambda *args: {"state": "error", "message": "Disk full"})
+    controller.change_mode("editing")
+    calls.clear()
+    with pytest.raises(UnsafeOperation, match="Backup"):
+        controller.change_mode("agent")
+    assert calls == []
+    assert controller.status()["mode"] == "error"
+    assert controller.status()["backup"]["last_success_at"] is None
