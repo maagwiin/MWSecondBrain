@@ -5,4 +5,11 @@ MWSB_BACKUP_DIR=/var/lib/mwsecondbrain/backups
 MWSB_FRONTEND_DIR=/opt/mwsecondbrain/current/frontend/dist
 MWSB_OBSIDIAN_CONFIG_DIR=/var/lib/mwsecondbrain/obsidian
 MWSB_SYNC_SCRIPT=/opt/mwsecondbrain/private-sync/brain_sync.py
+# Enable only after the real subscription inference gate succeeds.
+MWSB_CHAT_ENABLED=0
+MWSB_SUBSCRIPTION_VERIFIED=0
+MWSB_AUTH_DIR=/var/lib/mwsecondbrain/oauth
+# Enable only after explicit numeric-user pairing through tools/setup-telegram.py.
+MWSB_TELEGRAM_ENABLED=0
+MWSB_TELEGRAM_CONFIG=/etc/mwsecondbrain/telegram.json
 GIT_SSH_COMMAND="/usr/bin/ssh -i /etc/mwsecondbrain/github -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/mwsecondbrain/known_hosts"
