@@ -12,6 +12,8 @@ from pathlib import Path, PurePosixPath
 from .chat import timestamp
 
 NOTE_LIMIT = 512 * 1024
+GUIDANCE_LIMIT = 32 * 1024
+GUIDANCE_FILES = ("AGENTS.md", "SKILL.md", "README.md")
 PROTECTED = {"agents.md", "claude.md", "gemini.md", "skill.md", "system.md", "instructions.md",
              "readme.md", "codex.md", "soul.md", "identity.md", "tools.md"}
 
@@ -20,15 +22,22 @@ class NoteRejected(ValueError):
     pass
 
 
-def safe_path(value):
+def safe_read_path(value):
     if not isinstance(value, str) or not 1 <= len(value) <= 512 or "\\" in value or any(ord(c) < 32 for c in value):
         raise NoteRejected("Invalid note path")
     parts = value.split("/")
     if any(not part or part in {".", ".."} or part.startswith(".") for part in parts):
         raise NoteRejected("Traversal and hidden paths are not permitted")
     path = PurePosixPath(value)
-    if path.is_absolute() or path.suffix.lower() != ".md" or path.name.casefold() in PROTECTED:
-        raise NoteRejected("Only ordinary Markdown notes can be changed; instructions are protected")
+    if path.is_absolute() or path.suffix.lower() != ".md":
+        raise NoteRejected("Only nonhidden Markdown paths can be read")
+    return value
+
+
+def safe_path(value):
+    safe_read_path(value)
+    if PurePosixPath(value).name.casefold() in PROTECTED:
+        raise NoteRejected("Instruction files are protected and cannot be changed")
     return value
 
 
@@ -80,7 +89,7 @@ class NotesService:
                 path = Path(directory) / name
                 relative = path.relative_to(self.vault).as_posix()
                 try:
-                    safe_path(relative)
+                    safe_read_path(relative)
                 except NoteRejected:
                     continue
                 if path.is_symlink() or not path.is_file():
@@ -135,13 +144,48 @@ class NotesService:
             return snapshot
 
     def read(self, snapshot, path):
-        safe_path(path)
+        safe_read_path(path)
         with self.database.connect() as connection:
             metadata = connection.execute("SELECT available FROM note_snapshots WHERE id=?", (snapshot,)).fetchone()
             if not metadata or not metadata[0]:
                 raise NoteRejected("Trusted scanner or safe snapshot unavailable")
             row = connection.execute("SELECT content,content_hash FROM note_snapshot_files WHERE snapshot_id=? AND path=?", (snapshot, path)).fetchone()
         return {"path": path, "content": row[0] if row else "", "hash": row[1] if row else None, "exists": row is not None}
+
+    def guidance(self, snapshot):
+        """Bounded root guidance from the same immutable read snapshot as tools."""
+        records = []
+        for name in GUIDANCE_FILES:
+            try:
+                note = self.read(snapshot, name)
+                if not note["exists"]:
+                    continue
+                data = note["content"].encode("utf-8")
+                self._scan(name, data)
+                records.append((name, data))
+            except NoteRejected:
+                continue
+        if not records:
+            return ""
+        labels = {name: f"\n### Read-only brain guidance: {name}\n".encode() for name, _ in records}
+        truncation = b"\n[Truncated to the guidance limit]\n"
+        budget = GUIDANCE_LIMIT - sum(len(label) + len(truncation) + 1 for label in labels.values())
+        allocations = {}
+        # Give small files their full allowance before sharing remaining space.
+        for index, (name, data) in enumerate(sorted(records, key=lambda item: len(item[1]))):
+            allocation = min(len(data), budget // (len(records) - index))
+            allocations[name] = allocation
+            budget -= allocation
+        sections = []
+        for name, data in records:
+            bounded = data[:allocations[name]].decode("utf-8", errors="ignore").encode()
+            sections.append(labels[name] + bounded + (truncation if len(bounded) < len(data) else b"\n"))
+        result = b"".join(sections)
+        try:
+            self._scan("guidance.md", result)
+        except NoteRejected:
+            return ""
+        return result.decode("utf-8")
 
     def search(self, snapshot, query, limit=10):
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= 256:

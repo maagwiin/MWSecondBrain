@@ -308,3 +308,21 @@ def test_worker_shutdown_waits_for_runtime_reaping_and_marks_uncertain(context):
         assert worker.lock_descriptor is None
     asyncio.run(scenario())
     assert store.view()["jobs"][0]["status"] == "uncertain"
+
+
+def test_worker_attaches_snapshot_guidance_without_promoting_ordinary_notes(context):
+    from mwsecondbrain.notes import NotesService
+    _, database, controller = context
+    controller.notes = NotesService(controller, policy=lambda path, content: None)
+    (controller.settings.vault / "AGENTS.md").write_text("Read-only brain instructions")
+    (controller.settings.vault / "ordinary.md").write_text("Ordinary untrusted note")
+    seen = []
+    class GuidanceRuntime(Runtime):
+        def run(self, *args, **kwargs):
+            seen.append(self.brain_guidance)
+            return "ok"
+    store = ChatStore(database)
+    store.enqueue("hello", "web", "guidance")
+    asyncio.run(ChatWorker(store, controller, GuidanceRuntime()).process_next())
+    assert "Read-only brain instructions" in seen[0]
+    assert "Ordinary untrusted note" not in seen[0]

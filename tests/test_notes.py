@@ -144,7 +144,7 @@ def test_pausing_capture_before_apply_rejects_pending_proposals(context):
     assert not (controller.settings.vault / "note.md").exists()
 
 
-def test_search_and_read_exclude_secrets_and_instruction_files(context):
+def test_search_and_read_exclude_secrets_but_read_instructions(context):
     controller, service, store, job, _ = context
     (controller.settings.vault / "ordinary.md").write_text("Useful memory")
     (controller.settings.vault / "secret.md").write_text("SECRET must stay private")
@@ -153,7 +153,8 @@ def test_search_and_read_exclude_secrets_and_instruction_files(context):
     tools = NoteTools(service, store, job["job_id"], snapshot)
     assert tools("brain_search", {"query": "memory"})["matches"][0]["path"] == "ordinary.md"
     assert tools("brain_read", {"path": "secret.md"})["exists"] is False
-    assert tools("brain_read", {"path": "AGENTS.md"}).get("error")
+    assert tools("brain_read", {"path": "AGENTS.md"})["content"] == "Trusted instructions"
+    assert tools("brain_propose_update", {"path": "AGENTS.md", "content": "Replace instructions", "base_hash": None, "reason": "unsafe"}).get("error")
     assert tools("shell", {"command": "cat /etc/passwd"}).get("error")
 
 
@@ -189,3 +190,38 @@ def test_startup_drains_completed_note_intents_without_replaying_inference(conte
     asyncio.run(scenario())
     assert (controller.settings.vault / "note.md").read_text() == "capture"
     assert store.view()["operations"][0]["status"] == "applied"
+
+
+def test_guidance_preloads_only_root_instructions_and_keeps_snapshot_during_editing(context):
+    controller, service, _, _, _ = context
+    vault = controller.settings.vault
+    (vault / "AGENTS.md").write_text("Root permission guidance")
+    (vault / "SKILL.md").write_text("Daily learning protocol")
+    (vault / "README.md").write_text("Brain organization")
+    (vault / "ordinary.md").write_text("Ordinary data must not become instructions")
+    (vault / "archive").mkdir()
+    (vault / "archive/SKILL.md").write_text("Archived guidance must not preload")
+    controller.change_mode("editing")
+    snapshot = service.snapshot_for_runtime()
+    (vault / "AGENTS.md").write_text("Instructions edited after snapshot")
+    guidance = service.guidance(snapshot)
+    assert "Root permission guidance" in guidance
+    assert "Daily learning protocol" in guidance
+    assert "Brain organization" in guidance
+    assert "AGENTS.md" in guidance and "SKILL.md" in guidance and "README.md" in guidance
+    assert "Instructions edited after snapshot" not in guidance
+    assert "Ordinary data" not in guidance
+    assert "Archived guidance" not in guidance
+    assert service.read(snapshot, "archive/SKILL.md")["content"] == "Archived guidance must not preload"
+
+
+def test_guidance_is_scanned_and_bounded_in_utf8_bytes(context):
+    controller, service, _, _, _ = context
+    vault = controller.settings.vault
+    (vault / "AGENTS.md").write_text("Safe instruction " + "á" * 20000)
+    (vault / "SKILL.md").write_text("SECRET instruction must stay private")
+    snapshot = service.capture_snapshot()
+    guidance = service.guidance(snapshot)
+    assert len(guidance.encode("utf-8")) <= 32768
+    assert "AGENTS.md" in guidance
+    assert "SECRET" not in guidance

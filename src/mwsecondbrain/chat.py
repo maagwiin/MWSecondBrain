@@ -397,6 +397,7 @@ class ChatWorker:
                     # Injectable simulators need the same isolated attachment contract.
                     runtime = copy.copy(runtime)
                     runtime.work_dir = workspace
+            runtime.brain_guidance = self.controller.notes.guidance(snapshot)
             if job["attachment_ids"]:
                 if self.attachments_resolver is None:
                     raise RuntimeFailure("Attachment resolver unavailable")
