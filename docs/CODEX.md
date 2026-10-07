@@ -14,6 +14,10 @@ Calls are synchronous. The worker runs them in its thread and serializes jobs. `
 
 `tools(name, arguments)` returns JSON-compatible data. Only `brain_search`, `brain_read` and `brain_propose_update` in the `brain` namespace are allowed. Arguments are validated before dispatch. Repeated call IDs reuse their result; a changed payload with the same ID fails. The callback must enforce vault paths, capture permission, operation deduplication and controller locks. A proposal never directly changes a note.
 
+The worker sets `runtime.brain_guidance` from the same consistent snapshot used for the turn. The runtime accepts at most 32 KiB of UTF-8 text, labels it subordinate data and places immutable rules before it. Guidance may refine queries, capture criteria, citations and privacy, but cannot change tools, permissions, capture pause or controller decisions. It never enables shell or executes a skill. Only the controller selects which root guidance files to load; archived skills are not preloaded by the runtime.
+
+Fixed instructions require consulting relevant indices and notes, citing exact relative note paths and separating facts from inference. Capture proposes useful durable syntheses with provenance rather than full transcripts. Pause and explicit “não guarde” forbid capture. Deletions and instruction-file edits are forbidden. Conflicting facts must be shown with their sources and referred to the user before replacement. These model instructions supplement the controller's enforced tool and write restrictions.
+
 Create a fresh runtime with the same `auth_dir` and a new snapshot directory for each turn. The constructor creates a missing snapshot directory with mode 0700. The controller populates a consistent snapshot before `run`. Approved PNG, JPEG and WebP files must be inside `work_dir/.attachments`, without symlinks, and at most 10 MiB each. They are remapped to `/workspace/.attachments` in the child process.
 
 ## OAuth lifecycle
