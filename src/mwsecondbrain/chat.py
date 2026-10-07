@@ -383,6 +383,7 @@ class ChatWorker:
 
     def _run(self, job):
         from .notes import NoteTools
+        from .controller import ControllerBusy
         cancelled = lambda: self.closing.is_set() or self.store.cancelled(job["id"])
         fresh_workspace = None
         try:
@@ -390,7 +391,20 @@ class ChatWorker:
                 raise Cancelled()
             if job["model"] is not None and job["model"] not in {model["id"] for model in self.catalog}:
                 raise RuntimeFailure("Model is not in the account catalog")
-            snapshot = self.controller.notes.snapshot_for_runtime()
+            # A transition may own the lock after claim but before inference.
+            # Retry only this preparation step; runtime.run is never replayed.
+            snapshot_deadline = time.monotonic() + 300
+            while True:
+                if cancelled():
+                    raise Cancelled()
+                try:
+                    snapshot = self.controller.notes.snapshot_for_runtime()
+                    break
+                except ControllerBusy:
+                    remaining = snapshot_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeFailure("Controller stayed busy before inference; explicit retry is required") from None
+                    time.sleep(min(0.1, remaining))
             tools = NoteTools(self.controller.notes, self.store, job["id"], snapshot, cancelled)
             messages = self.store.context(job)
             images = []

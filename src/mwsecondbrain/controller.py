@@ -18,6 +18,10 @@ class UnsafeOperation(Exception):
     """An operation cannot safely proceed; HTTP callers receive a conflict."""
 
 
+class ControllerBusy(UnsafeOperation):
+    """Another operation temporarily owns the controller lock."""
+
+
 class EditorHelper:
     path = Path("/usr/local/libexec/mwsb-editor")
 
@@ -91,7 +95,7 @@ class Controller:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 locked = True
             except BlockingIOError:
-                raise UnsafeOperation("Another controller operation is running") from None
+                raise ControllerBusy("Another controller operation is running") from None
             yield
         finally:
             if locked:

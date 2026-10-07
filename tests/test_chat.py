@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from mwsecondbrain.app import create_app
 from mwsecondbrain.chat import ChatStore, ChatWorker, QuotaExceeded, AuthRequired, Cancelled
 from mwsecondbrain.config import Settings
-from mwsecondbrain.controller import Controller
+from mwsecondbrain.controller import Controller, UnsafeOperation
 from mwsecondbrain.db import Database
 
 
@@ -100,6 +100,81 @@ def test_running_cancel_is_persistent_and_keeps_event_loop_free(context):
         await asyncio.wait_for(task, 2)
     asyncio.run(scenario())
     assert store.view()["jobs"][0]["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("cancel_waiting", [False, True])
+def test_controller_contention_waits_before_inference_and_honors_cancel(context, monkeypatch, cancel_waiting):
+    _, database, controller = context
+    store, runtime = ChatStore(database), Runtime()
+    job = store.enqueue("wait for controller", "web", "controller-wait")
+    worker = ChatWorker(store, controller, runtime)
+    attempted = threading.Event()
+    snapshot = controller.notes.snapshot_for_runtime
+
+    def observe_snapshot():
+        attempted.set()
+        return snapshot()
+
+    monkeypatch.setattr(controller.notes, "snapshot_for_runtime", observe_snapshot)
+
+    async def scenario():
+        with controller.exclusive():
+            task = asyncio.create_task(worker.process_next())
+            for _ in range(200):
+                if attempted.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert attempted.is_set()
+            assert runtime.calls == []
+            assert store.view()["jobs"][0]["status"] == "running"
+            if cancel_waiting:
+                store.cancel(job["job_id"])
+                await asyncio.wait_for(task, 2)
+        if not cancel_waiting:
+            await asyncio.wait_for(task, 2)
+
+    asyncio.run(scenario())
+    assert len(runtime.calls) == (0 if cancel_waiting else 1)
+    assert store.view()["jobs"][0]["status"] == ("cancelled" if cancel_waiting else "completed")
+
+
+def test_nonbusy_snapshot_failure_is_not_retried(context, monkeypatch):
+    _, database, controller = context
+    store, runtime = ChatStore(database), Runtime()
+    store.enqueue("unsafe snapshot", "web", "snapshot-error")
+    attempts = []
+
+    def fail_snapshot():
+        attempts.append(True)
+        raise UnsafeOperation("Editor is running or its writer state is unknown")
+
+    monkeypatch.setattr(controller.notes, "snapshot_for_runtime", fail_snapshot)
+    asyncio.run(ChatWorker(store, controller, runtime).process_next())
+    assert len(attempts) == 1
+    assert runtime.calls == []
+    assert store.view()["jobs"][0]["status"] == "failed"
+
+
+def test_controller_snapshot_wait_has_finite_deadline(context, monkeypatch):
+    from types import SimpleNamespace
+    import mwsecondbrain.chat as chat_module
+    from mwsecondbrain.controller import ControllerBusy
+
+    _, database, controller = context
+    store, runtime = ChatStore(database), Runtime()
+    store.enqueue("bounded controller wait", "web", "bounded-wait")
+    times = iter([0, 301])
+    monkeypatch.setattr(chat_module, "time", SimpleNamespace(monotonic=lambda: next(times), sleep=lambda _: None))
+
+    def busy_snapshot():
+        raise ControllerBusy("Another controller operation is running")
+
+    monkeypatch.setattr(controller.notes, "snapshot_for_runtime", busy_snapshot)
+    asyncio.run(ChatWorker(store, controller, runtime).process_next())
+    job = store.view()["jobs"][0]
+    assert job["status"] == "failed"
+    assert job["error"] == "Controller stayed busy before inference; explicit retry is required"
+    assert runtime.calls == []
 
 
 def test_restart_marks_running_job_uncertain_without_replay(context):
